@@ -1,112 +1,77 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
+import {
+  ArrowRight, CheckCircle, Flame, Hand, House, LockKey, Medal, MusicNote,
+  PianoKeys, PlayCircle, SpeakerHigh, Target, Trophy, UserCircle,
+} from "@phosphor-icons/react";
 
-const lessons = [
-  { number: 1, title: "初识旋律", state: "done" },
-  { number: 2, title: "右手入门", state: "done" },
-  { number: 3, title: "左手伴奏", state: "current" },
-  { number: 4, title: "双手合奏", state: "locked" },
-  { number: 5, title: "情感表达", state: "locked" },
-  { number: 6, title: "速度提升", state: "locked" },
-  { number: 7, title: "完整演奏", state: "locked" },
+const nav = [
+  ["学习之旅", House], ["曲库", MusicNote], ["练习室", PlayCircle], ["成就", Trophy], ["我的", UserCircle],
+] as const;
+
+const goals = [
+  ["练习时长 30 分钟", "22 / 30", 73], ["完整演奏 2 遍", "1 / 2", 50], ["正确率达到 80%", "76% / 80%", 95],
 ];
 
-const keys = ["C", "D", "E", "F", "G", "A", "B", "C", "D", "E", "F", "G", "A", "B"];
-const activeNotes = ["E", "G", "C"];
-
 export default function Home() {
-  const [started, setStarted] = useState(false);
-  const [note, setNote] = useState("E");
-  const [speed, setSpeed] = useState(72);
   const [activeNav, setActiveNav] = useState("学习之旅");
-  const currentHint = useMemo(
-    () => (started ? `正在聆听：${note}，保持手腕放松` : "准备好后，让第一颗音符亮起来"),
-    [note, started],
-  );
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [tempo, setTempo] = useState(72);
+  const [hand, setHand] = useState<"右手" | "左手">("右手");
+  const [notice, setNotice] = useState("准备开始今天的练习");
+
+  function togglePractice() {
+    setIsPlaying((previous) => !previous);
+    setNotice(isPlaying ? "练习已暂停，可以从这一小节继续" : "正在跟随月光节拍练习…");
+  }
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">◖</span><span>月光琴房</span></div>
-        <p className="brand-subtitle">学钢琴 · 更动听</p>
-        <nav aria-label="主导航">
-          {["学习之旅", "曲库", "练习室", "成就", "我的"].map((item, i) => (
-            <button key={item} onClick={() => setActiveNav(item)} className={`nav-item ${activeNav === item ? "active" : ""}`}>
-              <span>{["✦", "♫", "▣", "♜", "●"][i]}</span>{item}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-quote">在每一个音符里，<br />遇见更好的自己 ♫</div>
+    <main className="moonlight-app">
+      <aside className="left-nav" aria-label="月光琴房导航">
+        <div className="wordmark"><span className="crescent" aria-hidden="true">◖</span><span>月光琴房</span></div>
+        <p className="tagline">学钢琴 · 更动听</p>
+        <div className="nav-list">
+          {nav.map(([label, Icon]) => <button key={label} className={activeNav === label ? "nav-choice selected" : "nav-choice"} onClick={() => { setActiveNav(label); setNotice(`已切换到${label}`); }}><Icon weight="fill" size={25} /><span>{label}</span></button>)}
+        </div>
+        <img className="sidebar-still-life" src="/assets/sidebar-vase-candle.png" alt="烛光与花枝" />
+        <p className="sidebar-quote">在每一个音符里<br />遇见更好的自己 <MusicNote size={16} weight="fill" /></p>
       </aside>
 
-      <section className="workspace">
-        <header className="hero">
-          <div>
-            <p className="eyebrow">从零开始 · 30 天学会弹奏</p>
-            <h1>梦中的婚礼</h1>
-            <p className="hero-copy">把每一次练习，变成走向舞台的一小步。</p>
-          </div>
-          <div className="moon-scene" aria-hidden="true"><span className="moon" /><span className="piano-shape">♩</span></div>
+      <section className="app-stage">
+        <header className="hero-scene">
+          <div className="hero-copy"><h1>梦中的婚礼</h1><p>从零开始，30天学会弹奏</p></div>
+          <img src="/assets/moonlit-grand-piano.png" alt="月光下的三角钢琴" className="hero-piano" />
         </header>
 
-        <div className="content-grid">
-          <section className="panel journey-panel">
-            <div className="panel-heading"><span>学习进度地图</span><small>第 3 / 7 章</small></div>
-            <div className="lesson-path">
-              {lessons.map((lesson, index) => (
-                <div key={lesson.number} className={`lesson ${lesson.state}`}>
-                  <button aria-label={lesson.title} className="lesson-dot" onClick={() => lesson.state !== "locked" && setStarted(true)}>
-                    {lesson.state === "done" ? "✓" : lesson.state === "locked" ? "·" : lesson.number}
-                  </button>
-                  <span>{lesson.title}</span>
-                  {index < lessons.length - 1 && <i className="path-line" />}
-                </div>
-              ))}
+        <div className="dashboard-grid">
+          <section className="panel course-panel">
+            <header className="panel-title"><span>学习进度地图</span><small>第 3 / 7 章</small></header>
+            <div className="path-map"><img src="/assets/learning-path.png" alt="七阶段学习进度路径" />
+              <button className="course-stop stop-one" onClick={() => setNotice("初识旋律：已完成")}>1</button>
+              <button className="course-stop stop-two" onClick={() => setNotice("右手入门：已完成")}>2</button>
+              <button className="course-stop stop-three" onClick={() => setNotice("左手伴奏：当前练习")}>3</button>
+              <button className="course-stop stop-four" onClick={() => setNotice("双手合奏将在下一章节解锁")}><LockKey size={15} /></button>
             </div>
-            <div className="journey-caption">你已走过 2 个章节，下一站：<b>左手伴奏</b></div>
+            <div className="lesson-labels"><span>初识旋律<em>★ ★ ★</em></span><span>右手入门</span><span>左手伴奏</span><span>双手合奏</span></div>
+            <div className="lesson-labels lower"><span>情感表达</span><span>速度提升</span><span>完整演奏</span><span className="gold">舞台时刻</span></div>
           </section>
 
           <section className="panel practice-panel">
-            <div className="panel-heading"><span>当前练习 <em>第 3 章 · 左手伴奏</em></span><span className="tempo">♩ = {speed}</span></div>
-            <div className="score-card">
-              <div className={`playhead ${started ? "playing" : ""}`} />
-              <div className="clef">𝄞</div>
-              <div className="staff"><i /><i /><i /><i /><i /></div>
-              <div className="notes">♪　♫　♪　♩　♫　♪　♩</div>
-              <div className="fingerings">5　3　1　2　3　1　5</div>
-            </div>
-            <div className="piano-wrap">
-              <div className="piano-label"><span>虚拟钢琴</span><small>{currentHint}</small></div>
-              <div className="keyboard" role="group" aria-label="虚拟钢琴键盘">
-                {keys.map((key, index) => {
-                  const lit = activeNotes.includes(key) && index < 7;
-                  return <button key={`${key}-${index}`} onClick={() => { setNote(key); setStarted(true); }} className={`white-key ${lit && started ? "lit" : ""}`}><span>{key}</span>{[0, 1, 3, 4, 5, 7, 8, 10, 11].includes(index) && <i className="black-key" />}</button>;
-                })}
-              </div>
-            </div>
-            <div className="practice-controls">
-              <button className="subtle" onClick={() => setSpeed((value) => Math.max(50, value - 4))}>− 慢一点</button>
-              <button className="main-action" onClick={() => setStarted((value) => !value)}>{started ? "暂停练习" : "开始练习"}<span>→</span></button>
-              <button className="subtle" onClick={() => setSpeed((value) => Math.min(120, value + 4))}>快一点 +</button>
-            </div>
+            <header className="panel-title"><span>当前练习 <b>第1节 · 初识旋律</b></span><div className="tempo-readout">♩ = {tempo} <button onClick={() => setNotice("已打开示范演奏")}>示范</button></div></header>
+            <button className={isPlaying ? "score-image score-active" : "score-image"} onClick={togglePractice} aria-label="播放或暂停乐谱"><img src="/assets/practice-score.png" alt="梦中的婚礼练习乐谱" /></button>
+            <button className="keyboard-image" onClick={() => setNotice(`正在练习${hand}音区，跟随发光琴键`)} aria-label="播放琴键提示"><img src="/assets/glowing-keyboard.png" alt="发光的钢琴键盘" /></button>
+            <footer className="practice-footer"><button className="icon-control" onClick={() => setNotice("音轨已静音或恢复")}><SpeakerHigh size={20} />音轨</button><div className="hand-switch"><button className={hand === "左手" ? "hand active" : "hand"} onClick={() => setHand("左手")}><Hand size={20} />左手</button><button className={hand === "右手" ? "hand active" : "hand"} onClick={() => setHand("右手")}><Hand size={20} />右手</button></div><button className="icon-control" onClick={() => setNotice("已隐藏琴键提示")}><PianoKeys size={20} />隐藏</button></footer>
           </section>
 
-          <aside className="right-rail">
-            <section className="panel goal-panel">
-              <div className="panel-heading"><span>今日目标</span><span>◎</span></div>
-              {[['练习时长 30 分钟', '22 / 30'], ['完整演奏 2 遍', '1 / 2'], ['正确率达到 80%', '76 / 80']].map(([label, value]) => (
-                <div className="goal" key={label}><div><span>◉</span>{label}<b>{value}</b></div><progress value={parseInt(value, 10)} max={parseInt(value.split('/ ')[1], 10)} /></div>
-              ))}
-            </section>
-            <section className="panel stats-panel">
-              <div className="stat-row"><span>🔥 <b>7</b> 天<small>连续练习</small></span><span>✦ <b>1280</b><small>总经验值</small></span></div>
-              <div className="level"><span>Lv.4</span><div><i /></div><small>1280 / 2000</small></div>
-            </section>
-            <section className="panel chart-panel"><div className="panel-heading"><span>速度稳定性</span><small>近 7 次练习</small></div><div className="chart" aria-label="速度稳定性：平均 78%"><div className="chart-grid" /><div className="chart-line"><i /><i /><i /><i /><i /><i /><i /></div><span>平均 <b>78%</b></span></div></section>
-            <section className="encourage">✧ 坚持的每一天，<br />都是向舞台更近一步。</section>
+          <aside className="right-column">
+            <section className="panel goal-panel"><header className="panel-title"><span>今日目标</span><Target size={30} weight="duotone" /></header>{goals.map(([label, value, percent]) => <div className="goal-row" key={label}><div><span><CheckCircle size={16} weight="fill" />{label}</span><b>{value}</b></div><div className="goal-track"><i style={{ width: `${percent}%` }} /></div></div>)}</section>
+            <section className="panel streak-panel"><div className="streak-item"><Flame weight="fill" size={37} /><div><b>7 <small>天</small></b><span>连续练习</span></div></div><div className="streak-divider" /><div className="streak-item"><Medal weight="fill" size={35} /><div><b>1280</b><span>总经验值</span></div></div><div className="level-row"><b>Lv.4</b><div><i /></div><small>1280 / 2000</small></div></section>
+            <section className="panel stability-panel"><header className="panel-title"><span>速度稳定性</span><small>近7次练习</small></header><img src="/assets/stability-chart.png" alt="最近七次练习的速度稳定性曲线" className="stability-image" /><div className="average">平均 <b>78%</b></div></section>
+            <section className="encouragement"><MusicNote size={35} weight="fill" /><p>坚持的每一天，<br />都是向舞台更近一步。</p></section>
           </aside>
         </div>
+        <div className="bottom-bar"><p aria-live="polite">{notice}</p><div className="stage-lines" /><button className={isPlaying ? "start-button running" : "start-button"} onClick={togglePractice}>{isPlaying ? "暂停练习" : "开始练习"}<ArrowRight size={26} weight="bold" /></button></div>
       </section>
     </main>
   );
