@@ -14,6 +14,7 @@ import {
   Trophy,
   UserCircle,
 } from "@phosphor-icons/react";
+import { PlayablePiano } from "./playable-piano";
 
 const navItems = [
   ["学习之旅", GameController],
@@ -115,9 +116,7 @@ export default function Home() {
               <img src="/assets/reference-practice-score.png" alt="梦中的婚礼双手练习乐谱" />
             </button>
 
-            <button type="button" className="keyboard-button" onClick={() => setNotice(`正在练习${hand}音区`)} aria-label="播放琴键提示">
-              <img src="/assets/reference-keyboard.png" alt="高亮当前音符的钢琴键盘" />
-            </button>
+            <PlayablePiano key={hand} hand={hand} onActivity={setNotice} />
 
             <img className="practice-footer-art" src="/assets/reference-practice-footer.png" alt="" aria-hidden="true" />
             <footer className="practice-footer">
