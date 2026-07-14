@@ -25,6 +25,7 @@ import { PracticeTransport } from "@/lib/engine/transport";
 import { getEventsForExercise } from "@/lib/music/content/mariage-amour";
 import { beatsToSeconds } from "@/lib/music/tempo";
 import { RhythmLane } from "./RhythmLane";
+import { VirtualPiano } from "./VirtualPiano";
 
 type StageOnePracticeProps = {
   lessonId: "B1-01" | "B1-02";
@@ -44,88 +45,123 @@ function useTransportCleanup(transportRef: React.MutableRefObject<PracticeTransp
 }
 
 function ListenLesson() {
-  const events = useMemo(() => getEventsForExercise("B1-01"), []);
-  const transportRef = useRef<PracticeTransport | null>(null);
-  const rafRef = useRef<number | null>(null);
-  const [status, setStatus] = useState<"ready" | "listening" | "question" | "correct">("ready");
-  const [currentBeat, setCurrentBeat] = useState(-0.2);
-  const [message, setMessage] = useState("先闭上眼睛听一次，不需要看谱。");
-  useTransportCleanup(transportRef);
+  const events = useMemo(() => getEventsForExercise("B1-01")
+    .filter((item) => item.hand === "right" && item.measure === 6)
+    .sort((a, b) => a.beat - b.beat), []);
+  const contextRef = useRef<AudioContext | null>(null);
+  const timersRef = useRef<number[]>([]);
+  const [status, setStatus] = useState<"ready" | "demo" | "turn" | "correct">("ready");
+  const [step, setStep] = useState(0);
+  const [mistakes, setMistakes] = useState(0);
+  const [activeMidi, setActiveMidi] = useState<number | null>(null);
+  const [wrongMidi, setWrongMidi] = useState<number | null>(null);
+  const [message, setMessage] = useState("先看月月弹一遍，再用下面的钢琴原样弹回来。");
 
-  const stopAnimation = useCallback(() => {
-    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
-    rafRef.current = null;
+  const clearTimers = useCallback(() => {
+    timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    timersRef.current = [];
   }, []);
 
+  const ensureContext = useCallback(() => {
+    if (!contextRef.current) contextRef.current = new AudioContext({ latencyHint: "interactive" });
+    if (contextRef.current.state === "suspended") void contextRef.current.resume();
+    return contextRef.current;
+  }, []);
+
+  useEffect(() => () => {
+    clearTimers();
+    void contextRef.current?.close();
+    contextRef.current = null;
+  }, [clearTimers]);
+
   const playDemo = useCallback(async () => {
-    stopAnimation();
-    await transportRef.current?.stop();
-    const transport = new PracticeTransport({ bpm: 75, totalBeats: PHRASE_BEATS });
-    transportRef.current = transport;
-    const context = await transport.start();
-    setCurrentBeat(0);
-    setStatus("listening");
-    setMessage("听一听：长音之后，短音怎样排列？");
+    clearTimers();
+    const context = ensureContext();
+    const secondsPerBeat = beatsToSeconds(1, 75);
+    const audioStart = context.currentTime + 0.12;
+    setStatus("demo");
+    setStep(0);
+    setMistakes(0);
+    setWrongMidi(null);
+    setMessage("看好发亮的琴键，也听一听每个音之间的距离。");
 
     for (const item of events) {
-      const beat = eventBeat(item.measure, item.beat);
-      scheduleMidiTone(context, item.midi, transport.startTime + beatsToSeconds(beat, 75), beatsToSeconds(item.durationBeats, 75));
+      const delay = item.beat * secondsPerBeat;
+      const duration = item.durationBeats * secondsPerBeat;
+      scheduleMidiTone(context, item.midi, audioStart + delay, duration, 0.16);
+      timersRef.current.push(window.setTimeout(() => setActiveMidi(item.midi), (delay + 0.12) * 1000));
+      timersRef.current.push(window.setTimeout(() => setActiveMidi(null), (delay + 0.12 + Math.min(duration * 0.78, 0.48)) * 1000));
+    }
+    const endDelay = (3 * secondsPerBeat + 0.35) * 1000;
+    timersRef.current.push(window.setTimeout(() => {
+      setActiveMidi(null);
+      setStatus("turn");
+      setMessage("轮到你了！从刚才的第一个音开始。");
+    }, endDelay));
+  }, [clearTimers, ensureContext, events]);
+
+  const playUserNote = useCallback(async (midi: number) => {
+    if (status !== "turn") return;
+    const context = ensureContext();
+    scheduleMidiTone(context, midi, context.currentTime, 0.42, 0.14);
+    setActiveMidi(midi);
+    timersRef.current.push(window.setTimeout(() => setActiveMidi(null), 190));
+
+    const expected = events[step]?.midi;
+    if (midi !== expected) {
+      setWrongMidi(midi);
+      setMistakes((current) => current + 1);
+      setMessage("不是这个音，再听听脑海里的第一个落点。");
+      timersRef.current.push(window.setTimeout(() => setWrongMidi(null), 420));
+      return;
     }
 
-    const frame = () => {
-      const snapshot = transport.snapshot();
-      setCurrentBeat(snapshot.beat);
-      if (snapshot.state === "completed") {
-        stopAnimation();
-        setStatus("question");
-        setMessage("你听到的是哪一种长短规律？");
-        void transport.stop();
-        return;
-      }
-      rafRef.current = requestAnimationFrame(frame);
-    };
-    rafRef.current = requestAnimationFrame(frame);
-  }, [events, stopAnimation]);
-
-  function choose(correct: boolean) {
-    if (correct) {
+    const nextStep = step + 1;
+    setWrongMidi(null);
+    setMistakes(0);
+    setStep(nextStep);
+    if (nextStep === events.length) {
       setStatus("correct");
-      setMessage("听对了：一个长音接四个短音，然后重复一次。");
+      setMessage("你把整句旋律从耳朵搬到了手上！");
     } else {
-      setMessage("再听一次，注意每小节开头较长的第一个音。");
-      setStatus("ready");
+      setMessage(nextStep === 1 ? "第一个音对了，继续。" : "对，就是这样。继续弹下一个音。");
     }
-  }
+  }, [ensureContext, events, status, step]);
+
+  const coachTitle = status === "demo" ? "看我弹一遍" : status === "correct" ? "全部弹对了！" : status === "turn" ? "轮到你了！" : "先听，再弹";
+  const hintMidi = status === "turn" && mistakes >= 2 ? events[step]?.midi ?? null : null;
 
   return (
-    <section className="lesson-card listen-card" aria-labelledby="lesson-title">
-      <div className="lesson-kicker">听辨 · 第 6–7 小节</div>
-      <h1 id="lesson-title">先听见节奏</h1>
-      <p className="lesson-lead">{message}</p>
+    <section className="lesson-card listen-card echo-listen-card" aria-labelledby="lesson-title">
+      <div className="lesson-kicker">听辨 · 虚拟钢琴跟弹</div>
+      <h1 id="lesson-title">{coachTitle}</h1>
+      <p className="lesson-lead" aria-live="polite">{message}</p>
 
-      <div className={`listening-orb${status === "listening" ? " active" : ""}`} aria-hidden="true">
-        <span>♪</span>
-        <i style={{ transform: `scaleX(${Math.max(0.04, Math.min(1, currentBeat / PHRASE_BEATS))})` }} />
+      <div className="echo-coach" aria-hidden="true">
+        <img src="/assets/moon-panda-coach.png" alt="" />
+        <div className="echo-sequence-progress">
+          {events.map((event, index) => <i key={event.id} className={index < step ? "done" : index === step && status === "turn" ? "current" : ""} />)}
+        </div>
       </div>
 
-      {status === "ready" || status === "listening" ? (
-        <button type="button" className="moon-primary" onClick={() => void playDemo()} disabled={status === "listening"}>
-          <SpeakerHigh size={22} weight="fill" />
-          {status === "listening" ? "正在播放…" : "播放慢速示范"}
-        </button>
-      ) : null}
+      <VirtualPiano
+        activeMidi={activeMidi}
+        wrongMidi={wrongMidi}
+        hintMidi={hintMidi}
+        disabled={status !== "turn"}
+        onNote={(midi) => void playUserNote(midi)}
+      />
 
-      {status === "question" ? (
-        <div className="rhythm-options" role="group" aria-label="选择节奏轮廓">
-          <button type="button" onClick={() => choose(true)}><b>长</b><span>短 · 短 · 短 · 短</span><small>重复一次</small></button>
-          <button type="button" onClick={() => choose(false)}><b>均匀</b><span>六个一样长的音</span><small>重复一次</small></button>
-        </div>
-      ) : null}
+      <div className="echo-actions">
+        {status === "ready" ? <button type="button" className="moon-primary" onClick={() => void playDemo()}><SpeakerHigh size={22} weight="fill" />听老师弹</button> : null}
+        {status === "demo" ? <button type="button" className="moon-secondary" disabled><SpeakerHigh size={20} weight="fill" />正在示范…</button> : null}
+        {status === "turn" ? <button type="button" className="moon-secondary" onClick={() => void playDemo()}><ArrowCounterClockwise size={19} />再听一次</button> : null}
+      </div>
 
       {status === "correct" ? (
         <div className="lesson-success">
           <CheckCircle size={30} weight="fill" />
-          <div><b>节奏轮廓已记住</b><span>下一关，把听到的节奏亲手弹出来。</span></div>
+          <div><b>听辨跟弹完成</b><span>下一关保留这句旋律的节奏，暂时隐藏音高。</span></div>
           <Link href="/practice/B1-02">继续 <ArrowRight size={18} weight="bold" /></Link>
         </div>
       ) : null}

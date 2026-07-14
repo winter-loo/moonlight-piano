@@ -1,50 +1,40 @@
-# Visual QA — 月光琴房像素还原
+# Visual QA — 月光琴房听辨跟弹
 
-- **Source visual truth:** `C:\Users\HSPCAD~1\AppData\Local\Temp\codex-clipboard-94c33a73-25d9-4f37-bdc2-57bb3ffa3f41.png`
-- **Implementation screenshot:** `work/pixel-final-verified.png`
-- **Viewport:** 1568 × 1003
-- **State:** default learning-journey screen; practice stopped; right hand selected; tempo 72
-- **Full-view comparison evidence:** `work/visual-diff-verified/comparison.png`
-- **Focused comparison evidence:** `work/visual-diff-verified/heatmap.png` and `work/visual-diff-verified/overlay.png`
+- **Source visual truth:** `C:\Users\HSPCAD~1\AppData\Local\Temp\codex-clipboard-677b6661-6797-436c-a821-3cc264e97202.png`
+- **Implementation screenshot:** `tmp/qa/b1-turn.png`
+- **Viewport:** 1280 × 720（内置浏览器，横屏）
+- **State:** B1-01 示范播放结束，标题为“轮到你了！”，虚拟钢琴已解锁
+- **Combined comparison evidence:** `tmp/qa/b1-reference-vs-implementation.png`
+- **Completion evidence:** `tmp/qa/b1-complete.png`
 
-**Findings**
+## Findings
 
 - No actionable P0, P1, or P2 fidelity issues remain.
-- [P3] Browser-rendered icon glyphs and Chinese text anti-aliasing differ slightly from the raster reference in the non-selected navigation rows and a small number of live controls. This is intentionally retained so navigation and practice controls remain real, accessible HTML rather than a full-page screenshot.
-- The reference and implementation use the same frame, major-region coordinates, content state, hero crop, panel proportions, learning map, score, keyboard, data cards, CTA, and bottom-wave composition.
-- Pixel evaluator result: 97.579% of pixels are within the perceptual tolerance, mean absolute channel error is 2.6767/255, and RMS channel error is 9.1525/255. Strict zero-tolerance equality is not used as the visual gate because browser rasterization and image color conversion alter subpixel values even when the same PNG crop is rendered at an integer-aligned native size.
+- [P3] 实现沿用既有“月光琴房”深蓝与金色品牌界面，没有复制参考图的纯白背景。这是有意保留的产品设计差异；核心构图仍与参考一致：顶部任务提示、居中教练角色、下方占主导地位的十键钢琴。
+- [P3] 黑键增加了音名和电脑快捷键，白键增加了快捷键。它们是初学者与桌面验证所需的可操作提示。
+- 键盘、角色与文字均为独立可交互/可访问元素；没有把整张参考图当作页面背景。
 
-**Required Fidelity Surfaces**
+## Required Fidelity Surfaces
 
-- **Fonts and typography:** Brand and hero display type use exact reference crops. Remaining live text keeps the closest locally available Chinese serif/kai fallbacks; hierarchy, wrapping, size, and alignment match the source.
-- **Spacing and layout rhythm:** Sidebar, 238px hero, 402/549/306px dashboard columns, panel heights, gaps, right-column vertical offsets, and 445px CTA are aligned to the 1568 × 1003 source frame.
-- **Colors and visual tokens:** Navy surfaces, cyan progress accents, warm gold display elements, borders, and shadows are visually aligned; residual subpixel color error is quantified above.
-- **Image quality and asset fidelity:** Only complex photographic/decorative/notation regions and exact decorative component skins use raster assets. Navigation, layout, semantics, hotspots, state, buttons, and primary interactions remain HTML/CSS.
-- **Copy and content:** All product copy matches the design and remains available to assistive technology.
+- **Structure:** 标题 → 教练角色 → 进度点 → 十白键钢琴 → 重播动作，与参考的任务层级一致。
+- **Piano geometry:** 十个白键覆盖 C4–E5，七个黑键按真实音程分布；C/D/E、F/G/A/B、C/D/E 三组关系清楚。
+- **Typography and color:** 音名使用高对比彩色编码；任务标题保持既有金色品牌字体层级。
+- **Asset quality:** 教练角色是本项目生成并去背、裁边的透明 PNG，边缘清晰，无占位图或 CSS 绘图。
+- **Responsive layout:** 1280 × 720 横屏下无裁切、横向滚动或操作区重叠。
 
-**Interaction Verification**
+## Interaction Verification
 
-- `开始练习` changes to `暂停练习`.
-- `曲库` becomes the current navigation item.
-- `左手` changes to `aria-pressed="true"`.
-- Tempo changes from 72 to 76.
-- Stage hotspots, score, keyboard, demo, audio, hand, and keyboard-display controls are wired.
-- Final browser console check: no page errors.
+- “听老师弹”会按 75 BPM 依次播放并高亮 `D5–G4–B♭4–D5–C5`。
+- 示范结束后标题切换为“轮到你了！”，虚拟琴键才解锁。
+- 错误音不会推进序列，并出现纠错文案；连续错误后会提示目标键。
+- 正确复现五个音后进入“全部弹对了！”成功态，并开放“继续”进入 B1-02。
+- 触摸/鼠标与电脑键盘快捷键共用同一套输入处理。
+- 最终页面控制台检查：无页面错误。
 
-**Comparison History**
+## Comparison History
 
-- Pass 1: major grid and right-column alignment mismatch; perceptual-tolerance match 89.0704%. Fixed the natural 1568 × 1003 coordinate system, panel columns, and source-region placement.
-- Pass 2: corrected the dashboard row expansion and aligned course/practice/right panel bounds; match 93.9926%.
-- Pass 3: aligned brand, hero copy, goal/streak imagery, score, keyboard, and CTA assets while retaining HTML interaction layers; match 96.3721%.
-- Pass 4: aligned stability card and practice controls; match 96.6224%.
-- Final pass: aligned component headers, footer skin, and selected navigation state; match 97.579%. The combined comparison and heatmap show only P3 live-rendering residuals.
-
-**Implementation Checklist**
-
-- [x] Match the supplied natural viewport and default state.
-- [x] Keep complex visual assets local and component-scoped rather than using a full-page screenshot.
-- [x] Verify core practice interactions and navigation.
-- [x] Build and run deterministic pixel comparison with heatmap and combined comparison output.
-- [x] Confirm no browser console errors.
+- Pass 1: 结构正确，但角色素材包含较大的透明留白，视觉尺寸明显小于参考；记为 P2。
+- Pass 2: 裁去角色透明边界并提高横屏尺寸，角色与钢琴形成参考图相同的上下连接关系；P2 已解决。
+- Final pass: 参考图和实现截图放入同一张对照图复核；剩余差异均为品牌外壳和教学标注的有意变化。
 
 final result: passed

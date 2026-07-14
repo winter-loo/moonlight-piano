@@ -13,6 +13,13 @@ test("calibrated measures 6-7 contain 16 valid events", () => {
   assert.equal(mariageAmourContent.events.filter((event) => event.hand === "left").length, 6);
 });
 
+test("the first listening challenge is a playable piano echo exercise", () => {
+  const exercise = mariageAmourContent.exercises.find((item) => item.id === "B1-01");
+  assert.equal(exercise?.inputPolicy, "pitch");
+  assert.ok(exercise?.visibleLayers.includes("keyboard"));
+  assert.equal(exercise?.passCriteria.pitchAccuracy, 1);
+});
+
 test("pitch spelling preserves flats while mapping to MIDI", () => {
   assert.equal(spellingToMidi("Bb4"), 70);
   assert.equal(spellingToMidi("G2"), 43);
