@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   ArrowRight,
   GameController,
@@ -41,6 +42,7 @@ const mapStops = [
 ] as const;
 
 export default function Home() {
+  const router = useRouter();
   const [activeNav, setActiveNav] = useState("学习之旅");
   const [isPlaying, setIsPlaying] = useState(false);
   const [tempo, setTempo] = useState(72);
@@ -154,8 +156,8 @@ export default function Home() {
           <img className="wave-left" src="/assets/reference-bottom-wave-left.png" alt="" aria-hidden="true" />
           <img className="wave-right" src="/assets/reference-bottom-wave-right.png" alt="" aria-hidden="true" />
           <p className="sr-only" aria-live="polite">{notice}</p>
-          <button type="button" aria-label={isPlaying ? "暂停练习" : "开始练习"} className={isPlaying ? "start-button running" : "start-button"} onClick={togglePractice}>
-            <span>{isPlaying ? "暂停练习" : "开始练习"}</span><ArrowRight size={28} weight="bold" aria-hidden="true" />
+          <button type="button" aria-label="开始第 1 章练习" className="start-button" onClick={() => router.push("/practice/B1-01")}>
+            <span>开始练习</span><ArrowRight size={28} weight="bold" aria-hidden="true" />
           </button>
         </div>
       </section>

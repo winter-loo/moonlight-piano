@@ -1,98 +1,48 @@
-# vinext-starter
+# 月光琴房 Web MVP
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+面向钢琴零基础用户、优先适配 iPad 横屏的互动练习产品。当前实现覆盖产品实现规划的阶段 0 和阶段 1：工程基线、统一音乐时钟、课程内容模型，以及《梦中的婚礼》第 6–7 小节的听辨与纯节奏关卡。
 
-## Prerequisites
+## 已实现
 
-- Node.js `>=22.13.0`
+- 首页入口：`/`
+- B1-01 听辨关卡：`/practice/B1-01`
+- B1-02 纯节奏关卡：`/practice/B1-02`
+- 引擎诊断台：`/lab/engine`
+- `AudioContext` 主时钟、倒数、暂停、恢复和重来
+- SVG 色块从右向左移动，固定判定线
+- iPad 触控和电脑任意字符键节奏输入
+- 命中、早晚、多按与漏按评分，80% 达标
+- 第 6–7 小节结构化课程内容和运行时校验
+- 帧率、最大帧间隔与输入分发延迟诊断
 
-## Quick Start
+## 本地运行
+
+要求 Node.js `>=22.13.0`。
 
 ```bash
 npm install
 npm run dev
+```
+
+开发服务器启动后打开终端显示的本地地址。首次播放或练习必须由用户点击触发，这是 iPad Safari 和 Chrome 的 Web Audio 限制。
+
+## 质量检查
+
+```bash
+npm run lint
+npm test
 npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
+`npm run test:all` 会连续执行音乐引擎单元测试和生产构建。iPad 视口与真机检查项见 [`tests/ipad-viewport-matrix.md`](tests/ipad-viewport-matrix.md)。
 
-## Included Shape
+## 关键目录
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
+- `app/practice/`：沉浸式练习路由
+- `components/practice/`：阶段 1 关卡 UI
+- `lib/music/`：课程 schema、音高和速度工具
+- `lib/engine/`：Transport 与节奏评分
+- `lib/audio/`：节拍器和临时合成音色
+- `app/lab/engine/`：开发诊断台
 
-## Workspace Auth Headers
-
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
-```
-
-## Optional Dispatch-Owned ChatGPT Sign-In
-
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
-
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
-
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
-
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
-
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+阶段 2 将加入 G2–D5 自适应琴键、钢琴采样、统一触控/键盘输入，以及 B1-03、B1-04 右手练习。
