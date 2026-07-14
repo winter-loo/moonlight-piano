@@ -1,5 +1,5 @@
 {
-  "name": "site-creator-vinext-starter",
+  "name": "moonlight-piano-web",
   "version": "0.1.0",
   "private": true,
   "engines": {
@@ -11,6 +11,7 @@
     "start": "node scripts/run-vinext.mjs start",
     "test": "node --experimental-strip-types --test tests/unit/*.test.mjs",
     "test:all": "npm run test && npm run build",
+    "visual:diff": "node scripts/visual-diff.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
@@ -33,6 +34,7 @@
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
     "react-server-dom-webpack": "19.2.6",
+    "sharp": "^0.34.4",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
     "vinext": "0.0.50",
