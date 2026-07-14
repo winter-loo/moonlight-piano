@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "Bravura";
+  src: url("/fonts/Bravura.otf") format("opentype");
+  font-display: swap;
+}
+
 :root {
   --page: #010a1b;
   --stage: #031026;
@@ -266,19 +272,37 @@ button:focus-visible { outline: 2px solid #72edf7; outline-offset: 3px; }
 .echo-actions { min-height: 52px; display: flex; align-items: center; justify-content: center; margin-top: 21px; }
 .echo-actions .moon-secondary:disabled { opacity: .76; cursor: default; }
 
-.rhythm-card { padding-left: clamp(20px, 3vw, 40px); padding-right: clamp(20px, 3vw, 40px); }
-.lesson-progress { width: min(700px, 80%); height: 6px; margin: 0 auto 17px; overflow: hidden; border-radius: 8px; background: rgba(116,146,184,.14); }
-.rhythm-stage { position: relative; max-width: 1040px; margin: 0 auto; overflow: hidden; border: 1px solid rgba(116,157,205,.2); border-radius: 24px; background: linear-gradient(180deg, rgba(4,17,37,.83), rgba(7,27,51,.62)); box-shadow: inset 0 0 28px rgba(37,117,166,.08); }
+.rhythm-card { min-height: 0; padding: 20px clamp(20px, 3vw, 40px) 22px; }
+.rhythm-card h1 { margin-top: 7px; font-size: clamp(28px, 3.2vw, 38px); }
+.rhythm-card .lesson-lead { margin-bottom: 9px; }
+.lesson-progress { width: min(900px, 86%); height: 6px; margin: 0 auto 12px; overflow: hidden; border-radius: 8px; background: rgba(116,146,184,.14); }
+.rhythm-stage { position: relative; max-width: 1040px; margin: 0 auto; overflow: hidden; border: 1px solid rgba(146,160,177,.5); border-radius: 20px; background: #fbfbf8; box-shadow: 0 13px 30px rgba(1,8,18,.22), inset 0 1px #fff; }
 .rhythm-lane { width: 100%; }
-.rhythm-lane svg { display: block; width: 100%; height: auto; min-height: 190px; }
-.lane-lines line { stroke: rgba(123,153,190,.16); stroke-width: 2; }
-.judgment-line { stroke: #59e9f1; stroke-width: 5; }
-.judgment-dot { fill: #b3fbff; stroke: #43dbe7; stroke-width: 3; }
-.rhythm-block { transition: fill .12s ease, opacity .12s ease; filter: drop-shadow(0 6px 9px rgba(126,81,233,.25)); }
-.rhythm-block.matched { fill: #55e2b8; opacity: .42; }
-.rhythm-block.missed { fill: #e56d7d; opacity: .3; }
+.rhythm-lane svg { display: block; width: 100%; height: auto; min-height: 180px; }
+.staff-lines line { stroke: #d4d7da; stroke-width: 3; }
+.staff-lines .staff-barline { stroke-width: 2; }
+.staff-clef, .staff-accidental { fill: #8d9299; font-family: "Bravura", serif; }
+.staff-clef { font-size: 108px; }
+.staff-accidental { font-size: 44px; }
+.judgment-line { stroke: #55dce8; stroke-width: 6; opacity: .7; }
+.judgment-dot { fill: #eaffff; stroke: #43dbe7; stroke-width: 3; }
+.rhythm-block { filter: drop-shadow(0 4px 6px rgba(38,45,55,.2)); transition: opacity .12s ease; }
+.rhythm-block text { fill: #fff; font: 800 13px/1 ui-rounded, "Arial Rounded MT Bold", sans-serif; pointer-events: none; }
+.rhythm-block.matched { opacity: .28; }
+.rhythm-block.missed { opacity: .18; }
+.rhythm-block.missed rect { fill: #e56d7d; }
 .countdown { position: absolute; inset: 0; display: grid; place-items: center; color: #f7dca4; font: 700 72px/1 Georgia, serif; text-shadow: 0 0 30px rgba(238,192,104,.45); pointer-events: none; }
-.rhythm-controls { display: grid; grid-template-columns: minmax(220px, 360px) auto; align-items: center; justify-content: center; gap: 28px; margin: 24px auto 0; }
+.rhythm-piano { max-width: 1040px; margin: 10px auto 0; }
+.rhythm-piano .echo-piano { height: clamp(168px, 23vh, 195px); }
+.rhythm-piano .echo-key small { display: none; }
+.rhythm-piano .echo-white-key { padding-bottom: 16px; }
+.rhythm-piano .echo-black-key { padding-bottom: 13px; }
+.rhythm-piano .echo-black-key span { opacity: 0; }
+.rhythm-piano .echo-black-key:nth-child(5) span { opacity: 1; color: #67e2c7; }
+.rhythm-piano .echo-key.is-hint { animation: rhythmKeyHint 1s ease-in-out infinite; }
+@keyframes rhythmKeyHint { 50% { border-color: #ef7fc9; box-shadow: 0 4px 0 #b5abb6, 0 0 27px rgba(239,127,201,.58); } }
+.rhythm-controls { display: grid; grid-template-columns: minmax(310px, 1fr) auto; align-items: center; gap: 24px; max-width: 1040px; min-height: 48px; margin: 14px auto 0; }
+.rhythm-input-note { color: #7f94ad; text-align: left; font-size: 13px; }
 .tap-pad { min-height: 112px; display: grid; grid-template-columns: 46px 1fr; grid-template-rows: 1fr 1fr; align-items: center; column-gap: 8px; padding: 18px 28px; border: 1px solid rgba(91,220,232,.28); border-radius: 24px; text-align: left; color: #99adbf; background: linear-gradient(180deg, rgba(12,51,77,.8), rgba(5,28,53,.88)); touch-action: none; user-select: none; }
 .tap-pad svg { grid-row: 1 / 3; color: #5fe5ee; }
 .tap-pad span { align-self: end; color: #e9fbff; font-size: 20px; font-weight: 700; }

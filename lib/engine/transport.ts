@@ -21,6 +21,8 @@ export class PracticeTransport {
   readonly countInBeats: number;
   private contextValue: AudioContext | null = null;
   private startAudioTime = 0;
+  private startPerformanceTime = 0;
+  private pausedBeatValue: number | null = null;
   private stateValue: TransportState = "idle";
 
   constructor({ bpm, totalBeats, countInBeats = 0 }: TransportConfig) {
@@ -41,16 +43,19 @@ export class PracticeTransport {
   async start() {
     await this.stop();
     const context = new AudioContext({ latencyHint: "interactive" });
-    await context.resume();
+    if (context.state === "suspended") void context.resume();
     this.contextValue = context;
     this.startAudioTime = context.currentTime + beatsToSeconds(this.countInBeats, this.bpm);
+    this.startPerformanceTime = performance.now() + beatsToSeconds(this.countInBeats, this.bpm) * 1000;
+    this.pausedBeatValue = null;
     this.stateValue = this.countInBeats > 0 ? "count-in" : "playing";
     return context;
   }
 
   beat() {
     if (!this.contextValue) return -this.countInBeats;
-    return secondsToBeats(this.contextValue.currentTime - this.startAudioTime, this.bpm);
+    if (this.pausedBeatValue !== null) return this.pausedBeatValue;
+    return secondsToBeats((performance.now() - this.startPerformanceTime) / 1000, this.bpm);
   }
 
   snapshot(): TransportSnapshot {
@@ -70,19 +75,24 @@ export class PracticeTransport {
 
   async pause() {
     if (!this.contextValue || this.stateValue === "paused" || this.stateValue === "completed") return;
-    await this.contextValue.suspend();
+    this.pausedBeatValue = this.beat();
+    void this.contextValue.suspend();
     this.stateValue = "paused";
   }
 
   async resume() {
     if (!this.contextValue || this.stateValue !== "paused") return;
-    await this.contextValue.resume();
+    const pausedBeat = this.pausedBeatValue ?? 0;
+    this.startPerformanceTime = performance.now() - beatsToSeconds(pausedBeat, this.bpm) * 1000;
+    this.pausedBeatValue = null;
+    void this.contextValue.resume();
     this.stateValue = this.beat() < 0 ? "count-in" : "playing";
   }
 
   async stop() {
     const context = this.contextValue;
     this.contextValue = null;
+    this.pausedBeatValue = null;
     this.stateValue = "stopped";
     if (context && context.state !== "closed") await context.close();
   }

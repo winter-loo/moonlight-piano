@@ -7,7 +7,6 @@ import {
   ArrowLeft,
   ArrowRight,
   CheckCircle,
-  HandTap,
   Pause,
   Play,
   SpeakerHigh,
@@ -19,12 +18,11 @@ import {
   findNearestRhythmTarget,
   type RhythmResult,
   type RhythmTap,
-  type RhythmTarget,
 } from "@/lib/engine/rhythm-evaluator";
 import { PracticeTransport } from "@/lib/engine/transport";
 import { getEventsForExercise } from "@/lib/music/content/mariage-amour";
 import { beatsToSeconds } from "@/lib/music/tempo";
-import { RhythmLane } from "./RhythmLane";
+import { RhythmLane, type StaffRhythmTarget } from "./RhythmLane";
 import { VirtualPiano } from "./VirtualPiano";
 
 type StageOnePracticeProps = {
@@ -169,11 +167,13 @@ function ListenLesson() {
   );
 }
 
-function buildRhythmTargets(): RhythmTarget[] {
+function buildRhythmTargets(): StaffRhythmTarget[] {
   const base = getEventsForExercise("B1-02").map((item) => ({
     id: item.id,
     beat: eventBeat(item.measure, item.beat),
     durationBeats: item.durationBeats,
+    midi: item.midi,
+    label: item.spelling.replace(/\d/g, ""),
   }));
   return [0, 1].flatMap((loop) => base.map((target) => ({
     ...target,
@@ -189,12 +189,18 @@ function RhythmLesson() {
   const tapsRef = useRef<RhythmTap[]>([]);
   const matchedRef = useRef<Set<string>>(new Set());
   const finishedRef = useRef(false);
+  const activeTimerRef = useRef<number | null>(null);
   const [status, setStatus] = useState<"ready" | "running" | "paused" | "completed">("ready");
   const [currentBeat, setCurrentBeat] = useState(-3);
   const [matchedIds, setMatchedIds] = useState<Set<string>>(new Set());
-  const [feedback, setFeedback] = useState("色块到达青色线时，点击下方节奏键。电脑也可以按空格。 ");
+  const [activeMidi, setActiveMidi] = useState<number | null>(null);
+  const [feedback, setFeedback] = useState("看色块从右向左移动；到达青色线时，在下方钢琴弹一下。 ");
   const [result, setResult] = useState<RhythmResult | null>(null);
   useTransportCleanup(transportRef);
+
+  useEffect(() => () => {
+    if (activeTimerRef.current !== null) window.clearTimeout(activeTimerRef.current);
+  }, []);
 
   const finish = useCallback(async () => {
     if (finishedRef.current) return;
@@ -203,6 +209,7 @@ function RhythmLesson() {
     const nextResult = evaluateRhythmAttempt(targets, tapsRef.current);
     setResult(nextResult);
     setStatus("completed");
+    setActiveMidi(null);
     setFeedback(nextResult.accuracy >= 0.8 ? "节拍站稳了，你已经抓住这段旋律的骨架。" : "已经找到节奏了，再把落点收得更准一些。 ");
     await transportRef.current?.stop();
   }, [targets]);
@@ -233,7 +240,8 @@ function RhythmLesson() {
     setResult(null);
     setCurrentBeat(-3);
     setStatus("running");
-    setFeedback("先听三拍倒数，然后跟着色块弹两轮。 ");
+    setActiveMidi(null);
+    setFeedback("先听三拍倒数，然后跟着五线谱上的色块弹两轮。 ");
 
     const secondsPerBeat = beatsToSeconds(1, 60);
     for (let beat = -3; beat < PHRASE_BEATS * 2; beat += 1) {
@@ -242,13 +250,16 @@ function RhythmLesson() {
     runAnimation(transport);
   }, [runAnimation]);
 
-  const tap = useCallback(() => {
+  const tap = useCallback((midi = 60) => {
     const transport = transportRef.current;
     if (!transport || status !== "running") return;
     const beat = transport.beat();
     if (beat < 0 || beat >= PHRASE_BEATS * 2) return;
     const tapEvent = { id: `tap-${tapsRef.current.length + 1}`, beat };
     tapsRef.current.push(tapEvent);
+    setActiveMidi(midi);
+    if (activeTimerRef.current !== null) window.clearTimeout(activeTimerRef.current);
+    activeTimerRef.current = window.setTimeout(() => setActiveMidi(null), 170);
     const nearest = findNearestRhythmTarget(targets, beat, matchedRef.current);
     if (!nearest) {
       setFeedback("再等等，让色块更靠近青色线。 ");
@@ -258,18 +269,18 @@ function RhythmLesson() {
     setMatchedIds(new Set(matchedRef.current));
     const absolute = Math.abs(nearest.delta);
     setFeedback(absolute <= 0.14 ? "正好！" : nearest.delta < 0 ? "稍微早了一点" : "稍微晚了一点");
-    if (transport.context) scheduleMidiTone(transport.context, 60, transport.context.currentTime, 0.09, 0.09);
+    if (transport.context) scheduleMidiTone(transport.context, midi, transport.context.currentTime, 0.24, 0.1);
   }, [status, targets]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
-      const isRhythmKey = event.key.length === 1 || event.code === "Space" || event.code === "Enter";
+      const isRhythmKey = event.code === "Space" || event.code === "Enter";
       if (!isRhythmKey) return;
       const target = event.target as HTMLElement | null;
       if (target?.closest("button, a, input, textarea, select")) return;
       event.preventDefault();
-      tap();
+      tap(60);
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -296,10 +307,13 @@ function RhythmLesson() {
   const accuracyPercent = result ? Math.round(result.accuracy * 100) : 0;
   const progress = Math.max(0, Math.min(1, currentBeat / (PHRASE_BEATS * 2)));
   const countdown = currentBeat < 0 ? Math.max(1, Math.ceil(-currentBeat)) : null;
+  const suggestedMidi = status === "running" && currentBeat >= 0
+    ? targets.find((target) => target.beat >= currentBeat - 0.24 && !matchedIds.has(target.id))?.midi ?? null
+    : status === "ready" ? targets[0]?.midi ?? null : null;
 
   return (
     <section className="lesson-card rhythm-card" aria-labelledby="lesson-title">
-      <div className="lesson-kicker">纯节奏 · 60 BPM</div>
+      <div className="lesson-kicker">节奏跟弹 · 60 BPM</div>
       <h1 id="lesson-title">跟上月光节拍</h1>
       <p className="lesson-lead" aria-live="polite">{feedback}</p>
 
@@ -309,18 +323,18 @@ function RhythmLesson() {
         {countdown && status === "running" ? <div className="countdown" aria-live="assertive">{countdown}</div> : null}
       </div>
 
+      <div className="rhythm-piano">
+        <VirtualPiano
+          activeMidi={activeMidi}
+          hintMidi={suggestedMidi}
+          disabled={status !== "running" || currentBeat < 0}
+          onNote={(midi) => tap(midi)}
+        />
+      </div>
+
       {status !== "completed" ? (
         <div className="rhythm-controls">
-          <button
-            type="button"
-            className={`tap-pad${status === "running" ? " active" : ""}`}
-            onPointerDown={(event) => { event.preventDefault(); tap(); }}
-            disabled={status !== "running"}
-          >
-            <HandTap size={32} weight="fill" />
-            <span>{status === "running" ? "节奏键" : "准备后开始"}</span>
-            <small>触控或按空格</small>
-          </button>
+          <span className="rhythm-input-note">{status === "running" ? "任意琴键都算一次落点 · 本关只评分节奏" : "开始后，钢琴会在三拍倒数结束时解锁"}</span>
           <div className="practice-actions">
             {status === "ready" ? (
               <button type="button" className="moon-primary" onClick={() => void begin()}><Play size={19} weight="fill" />开始练习</button>

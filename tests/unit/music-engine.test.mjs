@@ -20,6 +20,14 @@ test("the first listening challenge is a playable piano echo exercise", () => {
   assert.equal(exercise?.passCriteria.pitchAccuracy, 1);
 });
 
+test("the rhythm challenge keeps the staff and piano visible", () => {
+  const exercise = mariageAmourContent.exercises.find((item) => item.id === "B1-02");
+  assert.equal(exercise?.inputPolicy, "any-key");
+  assert.ok(exercise?.visibleLayers.includes("staff"));
+  assert.ok(exercise?.visibleLayers.includes("keyboard"));
+  assert.equal(exercise?.passCriteria.rhythmAccuracy, 0.8);
+});
+
 test("pitch spelling preserves flats while mapping to MIDI", () => {
   assert.equal(spellingToMidi("Bb4"), 70);
   assert.equal(spellingToMidi("G2"), 43);
