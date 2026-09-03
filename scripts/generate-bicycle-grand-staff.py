@@ -924,8 +924,6 @@ def generate_grand_staff_html() -> str:
           this.timbre = mode;
           if (mode === 'sampled') {{
             this.initToneSampler();
-          }} else {{
-            this.bufferCache.clear();
           }}
         }}
       }}
@@ -1163,10 +1161,11 @@ def generate_grand_staff_html() -> str:
 
         const voice = {{ src, gain: noteGain, stopTime: startTime + durationSec + releaseTime + 0.05 }};
         this.activeVoices.push(voice);
+        const startOffsetSec = Math.max(0, startTime - ctx.currentTime);
         setTimeout(() => {{
           const idx = this.activeVoices.indexOf(voice);
           if (idx !== -1) this.activeVoices.splice(idx, 1);
-        }}, (durationSec + releaseTime + 0.2) * 1000);
+        }}, (startOffsetSec + durationSec + releaseTime + 0.2) * 1000);
       }}
 
       stopAll() {{
@@ -1180,8 +1179,8 @@ def generate_grand_staff_html() -> str:
         for (let v of this.activeVoices) {{
           try {{
             v.gain.gain.cancelScheduledValues(now);
-            v.gain.gain.setValueAtTime(v.gain.gain.value, now);
-            v.gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.04);
+            v.gain.gain.setValueAtTime(Math.max(0.0001, v.gain.gain.value), now);
+            v.gain.gain.linearRampToValueAtTime(0.0001, now + 0.04);
             v.src.stop(now + 0.05);
           }} catch (e) {{}}
         }}
