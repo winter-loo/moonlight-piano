@@ -413,6 +413,7 @@ def generate_grand_staff_html() -> str:
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bicycle Built for Two (双手大谱表) — Meloo Rounded SMuFL</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
   <style>
     @font-face {{
       font-family: 'MelooRounded';
@@ -499,6 +500,9 @@ def generate_grand_staff_html() -> str:
     }}
 
     .controls-panel {{
+      position: sticky;
+      top: 12px;
+      z-index: 100;
       background: var(--card-bg);
       border: 1px solid var(--card-border);
       border-radius: 12px;
@@ -509,7 +513,8 @@ def generate_grand_staff_html() -> str:
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+      backdrop-filter: blur(8px);
     }}
 
     .btn-group {{
@@ -667,8 +672,8 @@ def generate_grand_staff_html() -> str:
     <div class="controls-panel">
       <div class="btn-group">
         <button id="btn-play" onclick="togglePlay()">▶ 播放双手合奏 (Play)</button>
-        <button class="btn-secondary" onclick="stopPlayback()">⏹ 停止</button>
-        <button class="btn-secondary" onclick="resetToStart()">⏮ 复位</button>
+        <button id="btn-stop" class="btn-secondary" onclick="stopPlayback(true)">⏹ 停止</button>
+        <button id="btn-reset" class="btn-secondary" onclick="resetToStart()">⏮ 复位</button>
       </div>
 
       <div class="track-selector">
@@ -676,6 +681,20 @@ def generate_grand_staff_html() -> str:
         <button class="track-btn active" id="track-both" onclick="setTrack('both')">双手合奏 (Both)</button>
         <button class="track-btn" id="track-rh" onclick="setTrack('rh')">仅右手 (RH)</button>
         <button class="track-btn" id="track-lh" onclick="setTrack('lh')">仅左手 (LH)</button>
+      </div>
+
+      <div class="track-selector">
+        <span style="font-size:12px; color:var(--text-muted); margin: 0 6px;">音色:</span>
+        <button class="track-btn active" id="timbre-grand" onclick="setTimbre('grand')">三角钢琴 (Grand)</button>
+        <button class="track-btn" id="timbre-warm" onclick="setTimbre('warm')">温暖原声 (Warm)</button>
+        <button class="track-btn" id="timbre-bright" onclick="setTimbre('bright')">明亮立式 (Bright)</button>
+        <button class="track-btn" id="timbre-sampled" onclick="setTimbre('sampled')">真实采样 (Tone.js)</button>
+      </div>
+
+      <div class="slider-group">
+        <span>共鸣箱:</span>
+        <input type="range" id="reverb-slider" min="0" max="60" value="28" oninput="updateReverb(this.value)">
+        <span id="reverb-text" style="color:var(--accent); font-weight:bold; font-family:monospace;">28%</span>
       </div>
 
       <div class="slider-group">
@@ -692,7 +711,7 @@ def generate_grand_staff_html() -> str:
 
     <!-- Status Bar -->
     <div class="status-bar">
-      <div>当前小节: <strong id="cur-measure" style="color:var(--accent);">1</strong> / 34 | 双手状态: <strong id="cur-hands" style="color:var(--purple);">准备就绪</strong></div>
+      <div>当前小节: <strong id="cur-measure" style="color:var(--accent);">1</strong> / 34 | 音频引擎: <strong id="engine-status" style="color:var(--accent);">物理建模三角钢琴 (Soundboard Convolver)</strong></div>
       <div style="font-family:monospace; color:var(--text-muted);">Meloo Rounded SMuFL 大谱表 | 支持点击任意音符单音/和弦试听</div>
     </div>
 
@@ -710,69 +729,486 @@ def generate_grand_staff_html() -> str:
     const LEFT_HAND = {lh_json};
     const PITCH_FREQ = {json.dumps(PITCH_FREQ)};
 
-    let audioCtx = null;
     let isPlaying = false;
     let currentBPM = 100;
     let currentMeasureIdx = 0;
     let playbackTimeoutId = null;
     let activeTrack = 'both'; // 'both' | 'rh' | 'lh'
 
-    function getAudioContext() {{
-      if (!audioCtx) {{
-        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        audioCtx = new AudioContextClass();
+    // =========================================================================
+    // 🎼 Professional Acoustic Grand Piano Engine (Web Audio API)
+    // 物理声学建模三角钢琴引擎：
+    // 1. 非谐波刚性琴弦物理特性 (Inharmonic Partials: fn = n * f0 * sqrt(1 + B * n^2))
+    // 2. 多弦耦合与声学合唱拍频 (Coupled Trichord/Bichord Unison Detuning & Beating)
+    // 3. 双衰减动态包络 (Dual-Decay: Prompt Sound 快速衰减 + Singing Aftersound 悠长共鸣)
+    // 4. 频率衰减依赖性 (Frequency-Dependent Damping: 高频衰减迅速，基频持久共鸣)
+    // 5. 羊毛击槌非线性瞬态与琴体触键木质敲击 (Felt Strike Transient & Keybed Thump)
+    // 6. 云杉木音板脉冲响应立体声卷积混响 (Acoustic Spruce Soundboard Convolver)
+    // 7. 制音器毛毡离键阻尼 (Damper Felt Release Simulation)
+    // 8. 零延迟增量递推相位算法与按需静默预热 (Zero-Latency Incremental Phasor & Prewarm)
+    // =========================================================================
+
+    class AcousticPianoEngine {{
+      constructor() {{
+        this.ctx = null;
+        this.masterGain = null;
+        this.dryGain = null;
+        this.wetGain = null;
+        this.soundboardConvolver = null;
+        this.feltFilter = null;
+        this.bufferCache = new Map();
+        this.activeVoices = [];
+        this.reverbMix = 0.28;
+        this.timbre = 'grand'; // 'grand' | 'warm' | 'bright' | 'sampled'
+        this.volume = 0.85;
+        this.toneSampler = null;
+        this.isSamplerLoading = false;
+        this.isSamplerReady = false;
       }}
-      if (audioCtx.state === 'suspended') {{
-        audioCtx.resume();
+
+      initToneSampler() {{
+        if (this.toneSampler || this.isSamplerLoading) return;
+        if (typeof Tone === 'undefined') {{
+          console.warn('Tone.js is not loaded');
+          const statusEl = document.getElementById('engine-status');
+          if (statusEl) statusEl.textContent = 'Tone.js 脚本未加载';
+          return;
+        }}
+        this.isSamplerLoading = true;
+        const statusEl = document.getElementById('engine-status');
+        const timbreBtn = document.getElementById('timbre-sampled');
+        if (timbreBtn) timbreBtn.textContent = '采样下载中...';
+        if (statusEl) statusEl.textContent = '正在下载真实钢琴录音样本切片 (Salamander Grand)...';
+
+        try {{
+          this.toneSampler = new Tone.Sampler({{
+            urls: {{
+              "A1": "A1.mp3",
+              "A2": "A2.mp3",
+              "C3": "C3.mp3",
+              "D#3": "Ds3.mp3",
+              "F#3": "Fs3.mp3",
+              "A3": "A3.mp3",
+              "C4": "C4.mp3",
+              "D#4": "Ds4.mp3",
+              "F#4": "Fs4.mp3",
+              "A4": "A4.mp3",
+              "C5": "C5.mp3"
+            }},
+            baseUrl: "https://tonejs.github.io/audio/salamander/",
+            onload: () => {{
+              this.isSamplerReady = true;
+              this.isSamplerLoading = false;
+              if (timbreBtn) timbreBtn.textContent = '真实采样 (Tone.js)';
+              if (this.timbre === 'sampled' && statusEl) {{
+                statusEl.textContent = '真实录音采样 (Tone.js Salamander Grand)';
+              }}
+            }},
+            onerror: (err) => {{
+              console.warn('Tone.Sampler failed to load', err);
+              this.isSamplerLoading = false;
+              if (timbreBtn) timbreBtn.textContent = '真实采样 (离线)';
+              if (statusEl) statusEl.textContent = '真实录音样本离线，已自动回退为物理建模';
+            }}
+          }}).toDestination();
+        }} catch (e) {{
+          console.error('Tone.Sampler init error', e);
+          this.isSamplerLoading = false;
+        }}
       }}
-      return audioCtx;
+
+      ensureContext() {{
+        if (!this.ctx) {{
+          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+          this.ctx = new AudioContextClass({{ latencyHint: 'interactive' }});
+          this.initAudioGraph();
+        }}
+        if (this.ctx.state === 'suspended') {{
+          this.ctx.resume();
+        }}
+        return this.ctx;
+      }}
+
+      initAudioGraph() {{
+        const ctx = this.ctx;
+        this.masterGain = ctx.createGain();
+        this.masterGain.gain.setValueAtTime(this.volume, ctx.currentTime);
+
+        this.dryGain = ctx.createGain();
+        this.dryGain.gain.setValueAtTime(1.0 - this.reverbMix, ctx.currentTime);
+
+        this.wetGain = ctx.createGain();
+        this.wetGain.gain.setValueAtTime(this.reverbMix, ctx.currentTime);
+
+        // Soundboard Convolver (Physical spruce wood plate simulation)
+        this.soundboardConvolver = ctx.createConvolver();
+        this.soundboardConvolver.buffer = this.generateSoundboardIR(ctx);
+
+        // Felt hammer high-frequency absorption filter for reverberation return
+        this.feltFilter = ctx.createBiquadFilter();
+        this.feltFilter.type = 'lowpass';
+        this.feltFilter.frequency.setValueAtTime(3600, ctx.currentTime);
+        this.feltFilter.Q.setValueAtTime(0.7, ctx.currentTime);
+
+        // Routing:
+        // Sources -> dryGain -> masterGain -> destination
+        // Sources -> soundboardConvolver -> feltFilter -> wetGain -> masterGain -> destination
+        this.soundboardConvolver.connect(this.feltFilter);
+        this.feltFilter.connect(this.wetGain);
+        this.wetGain.connect(this.masterGain);
+        this.dryGain.connect(this.masterGain);
+        this.masterGain.connect(ctx.destination);
+      }}
+
+      generateSoundboardIR(ctx) {{
+        const sr = ctx.sampleRate;
+        const dur = 0.85;
+        const N = Math.floor(sr * dur);
+        const irBuf = ctx.createBuffer(2, N, sr);
+        const irL = irBuf.getChannelData(0);
+        const irR = irBuf.getChannelData(1);
+
+        // 18 Spruce soundboard modal frequencies (Hz)
+        const modes = [78, 110, 145, 188, 235, 290, 360, 440, 540, 660, 800, 980, 1200, 1480, 1800, 2200, 2700, 3300];
+        let seed = 1234567;
+        const rand = () => {{
+          seed = (seed * 1664525 + 1013904223) % 4294967296;
+          return seed / 4294967296;
+        }};
+
+        for (let m of modes) {{
+          const decay = 3.8 + (m / 260.0);
+          const phaseL = rand() * 2 * Math.PI;
+          const phaseR = rand() * 2 * Math.PI;
+          const amp = 1.0 / Math.sqrt(m);
+          for (let i = 0; i < N; i++) {{
+            const t = i / sr;
+            const env = Math.exp(-decay * t);
+            irL[i] += Math.sin(2 * Math.PI * m * t + phaseL) * env * amp;
+            irR[i] += Math.sin(2 * Math.PI * (m * 1.004) * t + phaseR) * env * amp;
+          }}
+        }}
+
+        // Diffuse wooden body reflections tail
+        let prevL = 0, prevR = 0;
+        for (let i = 0; i < N; i++) {{
+          const t = i / sr;
+          const env = Math.exp(-8.5 * t) * 0.35;
+          const nL = (rand() * 2 - 1) * env;
+          const nR = (rand() * 2 - 1) * env;
+          prevL = prevL * 0.65 + nL * 0.35;
+          prevR = prevR * 0.65 + nR * 0.35;
+          irL[i] += prevL;
+          irR[i] += prevR;
+        }}
+
+        // Peak normalization
+        let peak = 0;
+        for (let i = 0; i < N; i++) {{
+          const aL = Math.abs(irL[i]), aR = Math.abs(irR[i]);
+          if (aL > peak) peak = aL;
+          if (aR > peak) peak = aR;
+        }}
+        if (peak > 0) {{
+          const scale = 0.5 / peak;
+          for (let i = 0; i < N; i++) {{
+            irL[i] *= scale;
+            irR[i] *= scale;
+          }}
+        }}
+        return irBuf;
+      }}
+
+      setTimbre(mode) {{
+        if (['grand', 'warm', 'bright', 'sampled'].includes(mode)) {{
+          this.timbre = mode;
+          if (mode === 'sampled') {{
+            this.initToneSampler();
+          }} else {{
+            this.bufferCache.clear();
+          }}
+        }}
+      }}
+
+      setReverb(mixPercent) {{
+        this.reverbMix = Math.max(0, Math.min(0.8, mixPercent / 100.0));
+        if (this.ctx && this.dryGain && this.wetGain) {{
+          const now = this.ctx.currentTime;
+          this.dryGain.gain.setValueAtTime(1.0 - this.reverbMix, now);
+          this.wetGain.gain.setValueAtTime(this.reverbMix, now);
+        }}
+      }}
+
+      setVolume(val) {{
+        this.volume = Math.max(0, Math.min(1.0, val));
+        if (this.ctx && this.masterGain) {{
+          this.masterGain.gain.setValueAtTime(this.volume, this.ctx.currentTime);
+        }}
+      }}
+
+      // Synthesize note buffer with inharmonicity, unisons, dual decay, hammer transient
+      synthesizeBuffer(freq, sampleRate, velocity = 0.8) {{
+        const dur = 3.2;
+        const N = Math.floor(sampleRate * dur);
+        const left = new Float32Array(N);
+        const right = new Float32Array(N);
+
+        const B = (this.timbre === 'bright' ? 0.00009 : 0.00007) * Math.pow(freq / 100.0, 1.35);
+        const maxHarmonics = Math.min(22, Math.floor((sampleRate * 0.45) / freq));
+        const detuneSpread = this.timbre === 'bright' ? 1.25 : this.timbre === 'warm' ? 0.8 : 1.0;
+        const detunes = freq > 170 ? [-0.28 * detuneSpread, 0.0, 0.31 * detuneSpread] : [-0.15 * detuneSpread, 0.16 * detuneSpread];
+
+        // Grand piano stereo field: bass left, treble right
+        const pan = Math.max(-0.35, Math.min(0.35, (Math.log2(freq / 261.63) * 0.18)));
+        const gainL = Math.cos((pan + 1) * Math.PI / 4);
+        const gainR = Math.sin((pan + 1) * Math.PI / 4);
+
+        // Hammer transient (thump + felt click)
+        const thumpF = freq > 180 ? 135.0 : 95.0;
+        const thumpDecay = Math.exp(-75.0 / sampleRate);
+        const clickDecay = Math.exp(-280.0 / sampleRate);
+        let thumpAmp = (this.timbre === 'bright' ? 0.20 : 0.16) * velocity;
+        let clickAmp = (0.05 + 0.04 * velocity) * (this.timbre === 'warm' ? 0.7 : 1.0);
+        const wThump = 2 * Math.PI * thumpF / sampleRate;
+        let sThump = 0, cThump = 1;
+        const cosWThump = Math.cos(wThump), sinWThump = Math.sin(wThump);
+
+        const transSamples = Math.min(N, Math.floor(0.065 * sampleRate));
+        for (let i = 0; i < transSamples; i++) {{
+          const thump = sThump * thumpAmp;
+          const click = (Math.random() * 2 - 1) * clickAmp;
+          const trans = thump + click;
+          left[i] += trans * gainL;
+          right[i] += trans * gainR;
+
+          const nextS = sThump * cosWThump + cThump * sinWThump;
+          const nextC = cThump * cosWThump - sThump * sinWThump;
+          sThump = nextS; cThump = nextC;
+          thumpAmp *= thumpDecay;
+          clickAmp *= clickDecay;
+        }}
+
+        // Inharmonic partials with phasor recursion
+        for (let n = 1; n <= maxHarmonics; n++) {{
+          const fn = n * freq * Math.sqrt(1 + B * n * n);
+          if (fn >= sampleRate / 2) break;
+
+          let amp;
+          if (freq < 150) {{
+            if (n === 1) amp = 0.40;
+            else if (n === 2) amp = 1.00;
+            else if (n === 3) amp = 0.85;
+            else if (n === 4) amp = 0.55;
+            else if (n === 6) amp = 0.45;
+            else if (n === 7) amp = 0.35;
+            else amp = (1.0 / Math.pow(n, 1.15)) * 1.2;
+          }} else if (freq < 280) {{
+            if (n === 1) amp = 0.55;
+            else if (n === 2) amp = 1.00;
+            else if (n === 3) amp = 0.45;
+            else if (n === 4) amp = 0.25;
+            else if (n === 5) amp = 0.22;
+            else if (n === 6) amp = 0.25;
+            else amp = 1.0 / Math.pow(n, 1.2);
+          }} else {{
+            if (n === 1) amp = 0.65;
+            else if (n === 2) amp = 0.95 + 0.15 * velocity;
+            else if (n === 3) amp = 0.38;
+            else if (n === 4) amp = 0.18;
+            else if (n === 5) amp = 0.30;
+            else amp = 1.0 / Math.pow(n, 1.25 - 0.2 * velocity);
+          }}
+
+          const cutFreq = this.timbre === 'bright' ? 4400 : this.timbre === 'warm' ? 2800 : 3400;
+          amp *= 1.0 / (1.0 + Math.pow(fn / cutFreq, 2.0));
+
+          const promptDecayRate = (2.4 + 0.16 * Math.pow(n, 1.35) + (freq / 130.0)) * (this.timbre === 'warm' ? 1.1 : 1.0);
+          const afterDecayRate = 0.42 + 0.035 * Math.pow(n, 1.12) + (freq / 550.0);
+          const pDecayFactor = Math.exp(-promptDecayRate / sampleRate);
+          const aDecayFactor = Math.exp(-afterDecayRate / sampleRate);
+
+          let pEnv = 0.65 * amp;
+          let aEnv = 0.35 * amp;
+
+          const numD = detunes.length;
+          const sinT = new Float64Array(numD);
+          const cosT = new Float64Array(numD);
+          const dCos = new Float64Array(numD);
+          const dSin = new Float64Array(numD);
+
+          for (let d = 0; d < numD; d++) {{
+            const w = 2 * Math.PI * (fn + detunes[d] * (n / 2.0)) / sampleRate;
+            dCos[d] = Math.cos(w);
+            dSin[d] = Math.sin(w);
+            const phase = Math.random() * 2 * Math.PI;
+            sinT[d] = Math.sin(phase);
+            cosT[d] = Math.cos(phase);
+          }}
+
+          const ampL = gainL / numD;
+          const ampR = gainR / numD;
+
+          for (let i = 0; i < N; i++) {{
+            const env = pEnv + aEnv;
+            if (env < 0.00003 && i > 1200) break;
+
+            let sum = 0;
+            for (let d = 0; d < numD; d++) {{
+              sum += sinT[d];
+              const nextS = sinT[d] * dCos[d] + cosT[d] * dSin[d];
+              const nextC = cosT[d] * dCos[d] - sinT[d] * dSin[d];
+              sinT[d] = nextS;
+              cosT[d] = nextC;
+            }}
+
+            const sig = sum * env;
+            left[i] += sig * ampL;
+            right[i] += sig * ampR;
+
+            pEnv *= pDecayFactor;
+            aEnv *= aDecayFactor;
+          }}
+        }}
+
+        // Attack ramp (3ms)
+        const attSamples = Math.floor(0.003 * sampleRate);
+        for (let i = 0; i < attSamples; i++) {{
+          const f = i / attSamples;
+          left[i] *= f;
+          right[i] *= f;
+        }}
+
+        // Peak normalization
+        let peak = 0;
+        for (let i = 0; i < N; i++) {{
+          const aL = Math.abs(left[i]), aR = Math.abs(right[i]);
+          if (aL > peak) peak = aL;
+          if (aR > peak) peak = aR;
+        }}
+        if (peak > 0) {{
+          const scale = 0.85 / peak;
+          for (let i = 0; i < N; i++) {{
+            left[i] *= scale;
+            right[i] *= scale;
+          }}
+        }}
+
+        return {{ left, right }};
+      }}
+
+      getNoteBuffer(pitch) {{
+        const freq = PITCH_FREQ[pitch];
+        if (!freq) return null;
+        const ctx = this.ensureContext();
+        const cacheKey = `${{pitch}}_${{this.timbre}}`;
+        let buffer = this.bufferCache.get(cacheKey);
+        if (!buffer) {{
+          const {{ left, right }} = this.synthesizeBuffer(freq, ctx.sampleRate, 0.8);
+          buffer = ctx.createBuffer(2, left.length, ctx.sampleRate);
+          buffer.copyToChannel(left, 0);
+          buffer.copyToChannel(right, 1);
+          this.bufferCache.set(cacheKey, buffer);
+        }}
+        return buffer;
+      }}
+
+      playNote(pitch, durationSec, volume = 0.42, hand = 'rh', when = 0) {{
+        if (this.timbre === 'sampled') {{
+          if (this.isSamplerReady && this.toneSampler) {{
+            try {{
+              if (typeof Tone !== 'undefined' && Tone.context.state !== 'running') {{
+                Tone.start();
+              }}
+              const vel = volume * (hand === 'lh' ? 0.92 : 1.0);
+              const dur = durationSec * 0.95;
+              if (when > 0 && typeof Tone !== 'undefined' && this.ctx) {{
+                const offset = Math.max(0, when - this.ctx.currentTime);
+                this.toneSampler.triggerAttackRelease(pitch, dur, Tone.now() + offset, vel);
+              }} else if (typeof Tone !== 'undefined') {{
+                this.toneSampler.triggerAttackRelease(pitch, dur, undefined, vel);
+              }}
+              return;
+            }} catch (e) {{
+              console.warn('Tone.Sampler playback error', e);
+            }}
+          }} else if (!this.isSamplerLoading) {{
+            this.initToneSampler();
+          }}
+          // If sampler is still loading, smoothly fall back to physical modeling below!
+        }}
+
+        const buffer = this.getNoteBuffer(pitch);
+        if (!buffer) return;
+        const ctx = this.ctx;
+        const startTime = when > 0 ? when : ctx.currentTime;
+
+        const src = ctx.createBufferSource();
+        src.buffer = buffer;
+
+        const noteGain = ctx.createGain();
+        const targetVol = volume * (hand === 'lh' ? 0.94 : 1.0);
+        const releaseTime = Math.min(0.28, Math.max(0.12, durationSec * 0.25));
+
+        noteGain.gain.setValueAtTime(0.0001, startTime);
+        noteGain.gain.linearRampToValueAtTime(targetVol, startTime + 0.003);
+        noteGain.gain.setValueAtTime(targetVol, startTime + durationSec);
+        noteGain.gain.exponentialRampToValueAtTime(0.0001, startTime + durationSec + releaseTime);
+
+        src.connect(noteGain);
+        noteGain.connect(this.dryGain);
+        noteGain.connect(this.soundboardConvolver);
+
+        src.start(startTime);
+        src.stop(startTime + durationSec + releaseTime + 0.05);
+
+        const voice = {{ src, gain: noteGain, stopTime: startTime + durationSec + releaseTime + 0.05 }};
+        this.activeVoices.push(voice);
+        setTimeout(() => {{
+          const idx = this.activeVoices.indexOf(voice);
+          if (idx !== -1) this.activeVoices.splice(idx, 1);
+        }}, (durationSec + releaseTime + 0.2) * 1000);
+      }}
+
+      stopAll() {{
+        if (this.toneSampler && this.isSamplerReady) {{
+          try {{
+            this.toneSampler.releaseAll();
+          }} catch (e) {{}}
+        }}
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        for (let v of this.activeVoices) {{
+          try {{
+            v.gain.gain.cancelScheduledValues(now);
+            v.gain.gain.setValueAtTime(v.gain.gain.value, now);
+            v.gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.04);
+            v.src.stop(now + 0.05);
+          }} catch (e) {{}}
+        }}
+        this.activeVoices = [];
+      }}
+
+      prewarm(pitches) {{
+        this.ensureContext();
+        let delay = 0;
+        for (let p of pitches) {{
+          const key = `${{p}}_${{this.timbre}}`;
+          if (!this.bufferCache.has(key)) {{
+            setTimeout(() => {{
+              this.getNoteBuffer(p);
+            }}, delay);
+            delay += 20;
+          }}
+        }}
+      }}
     }}
 
-    // Multi-Harmonic Warm Piano Synthesizer (Polyphonic)
-    function playTone(pitch, durationSec, volume = 0.35, hand = 'rh') {{
-      const freq = PITCH_FREQ[pitch];
-      if (!freq) return;
-      const ctx = getAudioContext();
-      const now = ctx.currentTime;
-
-      const masterGain = ctx.createGain();
-      masterGain.connect(ctx.destination);
-
-      const attack = 0.008;
-      const decay = 0.25;
-      const sustainLevel = 0.35;
-      const release = Math.min(0.3, durationSec * 0.4);
-
-      masterGain.gain.setValueAtTime(0.0001, now);
-      masterGain.gain.linearRampToValueAtTime(volume, now + attack);
-      masterGain.gain.exponentialRampToValueAtTime(sustainLevel * volume, now + attack + decay);
-      masterGain.gain.setValueAtTime(sustainLevel * volume, now + durationSec);
-      masterGain.gain.exponentialRampToValueAtTime(0.0001, now + durationSec + release);
-
-      // Fundamental
-      const osc1 = ctx.createOscillator();
-      osc1.type = hand === 'lh' ? 'triangle' : 'triangle';
-      osc1.frequency.setValueAtTime(freq, now);
-      osc1.connect(masterGain);
-      osc1.start(now);
-      osc1.stop(now + durationSec + release);
-
-      // 2nd Harmonic
-      const osc2 = ctx.createOscillator();
-      const gain2 = ctx.createGain();
-      gain2.gain.value = hand === 'lh' ? 0.20 : 0.30;
-      osc2.type = 'sine';
-      osc2.frequency.setValueAtTime(freq * 2, now);
-      osc2.connect(gain2);
-      gain2.connect(masterGain);
-      osc2.start(now);
-      osc2.stop(now + durationSec + release);
-    }}
+    const pianoEngine = new AcousticPianoEngine();
 
     function playSingleNote(pitch, durBeats) {{
       if (!pitch) return;
       const beatSec = 60.0 / currentBPM;
-      playTone(pitch, durBeats * beatSec, 0.4);
+      pianoEngine.playNote(pitch, durBeats * beatSec, 0.46, 'rh', 0);
     }}
 
     function highlightMeasure(measureNum) {{
@@ -797,7 +1233,11 @@ def generate_grand_staff_html() -> str:
       if (!isPlaying) return;
 
       if (currentMeasureIdx >= RIGHT_HAND.length) {{
-        stopPlayback();
+        currentMeasureIdx = 0;
+        stopPlayback(false);
+        const curMeasEl = document.getElementById('cur-measure');
+        if (curMeasEl) curMeasEl.textContent = '1';
+        window.scrollTo({{ top: 0, behavior: 'smooth' }});
         return;
       }}
 
@@ -809,13 +1249,15 @@ def generate_grand_staff_html() -> str:
 
       highlightMeasure(measureNum);
 
-      // Play Right Hand
+      const ctx = pianoEngine.ensureContext();
+      const measureStartAudioTime = ctx.currentTime;
+
+      // Play Right Hand (Sample-accurate hardware audio scheduling)
       if (activeTrack === 'both' || activeTrack === 'rh') {{
         mRH.events.forEach(ev => {{
           if (ev.type === 'note') {{
-            setTimeout(() => {{
-              if (isPlaying) playTone(ev.pitch, ev.durationBeats * beatSec, 0.38, 'rh');
-            }}, ev.beat * beatSec * 1000);
+            const noteStart = measureStartAudioTime + ev.beat * beatSec;
+            pianoEngine.playNote(ev.pitch, ev.durationBeats * beatSec, 0.44, 'rh', noteStart);
           }}
         }});
       }}
@@ -824,9 +1266,8 @@ def generate_grand_staff_html() -> str:
       if (activeTrack === 'both' || activeTrack === 'lh') {{
         mLH.events.forEach(ev => {{
           if (ev.type === 'note') {{
-            setTimeout(() => {{
-              if (isPlaying) playTone(ev.pitch, ev.durationBeats * beatSec * 0.95, 0.32, 'lh');
-            }}, ev.beat * beatSec * 1000);
+            const noteStart = measureStartAudioTime + ev.beat * beatSec;
+            pianoEngine.playNote(ev.pitch, ev.durationBeats * beatSec * 0.96, 0.38, 'lh', noteStart);
           }}
         }});
       }}
@@ -838,21 +1279,31 @@ def generate_grand_staff_html() -> str:
     function togglePlay() {{
       const btn = document.getElementById('btn-play');
       if (isPlaying) {{
-        stopPlayback();
+        stopPlayback(false);
       }} else {{
+        if (currentMeasureIdx >= RIGHT_HAND.length) {{
+          currentMeasureIdx = 0;
+        }}
         isPlaying = true;
         btn.textContent = '⏸ 暂停 (Pause)';
         btn.style.background = '#f59e0b';
-        getAudioContext();
+        pianoEngine.ensureContext();
+        pianoEngine.prewarm(['F2', 'G2', 'A2', 'C3', 'D3', 'C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4']);
         stepMeasurePlayback();
       }}
     }}
 
-    function stopPlayback() {{
+    function stopPlayback(reset = false) {{
       isPlaying = false;
       if (playbackTimeoutId) {{
         clearTimeout(playbackTimeoutId);
         playbackTimeoutId = null;
+      }}
+      pianoEngine.stopAll();
+      if (reset) {{
+        currentMeasureIdx = 0;
+        const curMeasEl = document.getElementById('cur-measure');
+        if (curMeasEl) curMeasEl.textContent = '1';
       }}
       const btn = document.getElementById('btn-play');
       btn.textContent = '▶ 播放双手合奏 (Play)';
@@ -861,9 +1312,37 @@ def generate_grand_staff_html() -> str:
     }}
 
     function resetToStart() {{
-      stopPlayback();
-      currentMeasureIdx = 0;
+      stopPlayback(true);
       highlightMeasure(1);
+      window.scrollTo({{ top: 0, behavior: 'smooth' }});
+    }}
+
+    function setTimbre(mode) {{
+      pianoEngine.setTimbre(mode);
+      document.querySelectorAll('[id^=\"timbre-\"]').forEach(btn => btn.classList.remove('active'));
+      const activeBtn = document.getElementById('timbre-' + mode);
+      if (activeBtn) activeBtn.classList.add('active');
+      const names = {{
+        grand: '物理建模三角钢琴 (Concert Grand)',
+        warm: '录音室温暖原声 (Studio Warm)',
+        bright: '原声立式钢琴 (Bright Upright)',
+        sampled: pianoEngine.isSamplerReady ? '真实录音采样 (Tone.js Salamander Grand)' : '真实录音采样 (Tone.js 正在预载音频样本...)'
+      }};
+      const statusEl = document.getElementById('engine-status');
+      if (statusEl) statusEl.textContent = names[mode] || mode;
+    }}
+
+    // Preload Tone.js sampler in background after page load
+    setTimeout(() => {{
+      if (typeof Tone !== 'undefined') {{
+        pianoEngine.initToneSampler();
+      }}
+    }}, 1200);
+
+    function updateReverb(val) {{
+      pianoEngine.setReverb(Number(val));
+      const textEl = document.getElementById('reverb-text');
+      if (textEl) textEl.textContent = val + '%';
     }}
 
     function setTrack(track) {{
