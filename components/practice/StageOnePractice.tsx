@@ -6,10 +6,13 @@ import {
   ArrowCounterClockwise,
   ArrowLeft,
   ArrowRight,
+  CaretLeft,
+  CaretRight,
   CheckCircle,
   Pause,
   Play,
   SpeakerHigh,
+  X,
 } from "@phosphor-icons/react";
 
 import { scheduleMetronome, scheduleMidiTone } from "@/lib/audio/scheduler";
@@ -23,6 +26,7 @@ import { PracticeTransport } from "@/lib/engine/transport";
 import { getEventsForExercise } from "@/lib/music/content/mariage-amour";
 import { beatsToSeconds } from "@/lib/music/tempo";
 import { RhythmLane, type StaffRhythmTarget } from "./RhythmLane";
+import { SectionTwentyOneScore } from "./SectionTwentyOneScore";
 import { VirtualPiano } from "./VirtualPiano";
 
 type StageOnePracticeProps = {
@@ -30,6 +34,8 @@ type StageOnePracticeProps = {
 };
 
 const PHRASE_BEATS = 6;
+const MAIN_LOOPS = 3;
+const SHOW_STATIC_SCORE_REVIEW = true;
 
 function eventBeat(measure: number, beat: number) {
   return (measure - 6) * 3 + beat;
@@ -167,7 +173,7 @@ function ListenLesson() {
   );
 }
 
-function buildRhythmTargets(): StaffRhythmTarget[] {
+function buildRhythmTargets(loops = MAIN_LOOPS): StaffRhythmTarget[] {
   const base = getEventsForExercise("B1-02").map((item) => ({
     id: item.id,
     beat: eventBeat(item.measure, item.beat),
@@ -175,11 +181,33 @@ function buildRhythmTargets(): StaffRhythmTarget[] {
     midi: item.midi,
     label: item.spelling.replace(/\d/g, ""),
   }));
-  return [0, 1].flatMap((loop) => base.map((target) => ({
+  return Array.from({ length: loops }, (_, loop) => loop).flatMap((loop) => base.map((target) => ({
     ...target,
     id: `${target.id}-loop-${loop + 1}`,
     beat: target.beat + loop * PHRASE_BEATS,
   })));
+}
+
+function StaticScoreReview() {
+  return (
+    <main className="section21-score-screen" aria-labelledby="score-review-title">
+      <div className="section21-score-progress" aria-hidden="true"><i /></div>
+      <Link href="/" className="section21-score-exit" aria-label="返回课程首页"><X size={42} weight="regular" /></Link>
+
+      <header className="section21-score-header">
+        <p>产品文档 21.3 · 实机谱面记录</p>
+        <h1 id="score-review-title">全部音符</h1>
+        <div className="section21-score-stats" aria-label="谱面统计">
+          <span><strong>34</strong> 小节</span>
+          <span><strong>75</strong> 音符</span>
+          <span><strong>10</strong> 休止符</span>
+          <span><strong>3/4</strong> 拍</span>
+        </div>
+      </header>
+
+      <SectionTwentyOneScore />
+    </main>
+  );
 }
 
 function RhythmLesson() {
@@ -190,29 +218,79 @@ function RhythmLesson() {
   const matchedRef = useRef<Set<string>>(new Set());
   const finishedRef = useRef(false);
   const activeTimerRef = useRef<number | null>(null);
-  const [status, setStatus] = useState<"ready" | "running" | "paused" | "completed">("ready");
-  const [currentBeat, setCurrentBeat] = useState(-3);
+  const toastTimerRef = useRef<number | null>(null);
+  const recoveryTimerRef = useRef<number | null>(null);
+  const autoStartedRef = useRef(false);
+  const resumeAfterExitRef = useRef(false);
+  const phaseRef = useRef<"main" | "recovery">("main");
+  const activeTargetsRef = useRef<StaffRhythmTarget[]>(targets);
+  const attemptTotalRef = useRef(PHRASE_BEATS * MAIN_LOOPS);
+  const mainResultRef = useRef<RhythmResult | null>(null);
+  const [status, setStatus] = useState<"booting" | "running" | "paused" | "recovery-prompt" | "completed">("booting");
+  const [phase, setPhase] = useState<"main" | "recovery">("main");
+  const [currentBeat, setCurrentBeat] = useState(-1.5);
+  const [activeTargets, setActiveTargets] = useState<StaffRhythmTarget[]>(targets);
+  const [retryTargets, setRetryTargets] = useState<StaffRhythmTarget[]>([]);
   const [matchedIds, setMatchedIds] = useState<Set<string>>(new Set());
   const [activeMidi, setActiveMidi] = useState<number | null>(null);
-  const [feedback, setFeedback] = useState("看色块从右向左移动；到达青色线时，在下方钢琴弹一下。 ");
+  const [feedback, setFeedback] = useState("让音符抵达判定线时，弹下对应琴键。");
+  const [timingToast, setTimingToast] = useState("");
+  const [hitSerial, setHitSerial] = useState(0);
   const [result, setResult] = useState<RhythmResult | null>(null);
+  const [exitOpen, setExitOpen] = useState(false);
+  const [trayOpen, setTrayOpen] = useState(false);
   useTransportCleanup(transportRef);
 
   useEffect(() => () => {
     if (activeTimerRef.current !== null) window.clearTimeout(activeTimerRef.current);
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    if (recoveryTimerRef.current !== null) window.clearTimeout(recoveryTimerRef.current);
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
   }, []);
 
   const finish = useCallback(async () => {
     if (finishedRef.current) return;
     finishedRef.current = true;
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
-    const nextResult = evaluateRhythmAttempt(targets, tapsRef.current);
-    setResult(nextResult);
-    setStatus("completed");
+    const attemptTargets = activeTargetsRef.current;
+    const nextResult = evaluateRhythmAttempt(attemptTargets, tapsRef.current);
     setActiveMidi(null);
-    setFeedback(nextResult.accuracy >= 0.8 ? "节拍站稳了，你已经抓住这段旋律的骨架。" : "已经找到节奏了，再把落点收得更准一些。 ");
     await transportRef.current?.stop();
-  }, [targets]);
+
+    if (phaseRef.current === "main" && nextResult.misses.length > 0) {
+      const missed = new Set(nextResult.misses);
+      const compactTargets = attemptTargets
+        .filter((target) => missed.has(target.id))
+        .map((target, index) => ({
+          ...target,
+          id: `retry-${target.id}`,
+          beat: index * 1.25,
+          durationBeats: Math.min(1, target.durationBeats),
+        }));
+      mainResultRef.current = nextResult;
+      setRetryTargets(compactTargets);
+      setStatus("recovery-prompt");
+      setFeedback(`刚才错过了 ${compactTargets.length} 个落点，马上集中练一遍。`);
+      return;
+    }
+
+    if (phaseRef.current === "recovery" && mainResultRef.current) {
+      const original = mainResultRef.current;
+      const recovered = nextResult.matches.length;
+      const remainingMisses = Math.max(0, original.misses.length - recovered);
+      setResult({
+        matches: [...original.matches, ...nextResult.matches],
+        misses: original.misses.slice(0, remainingMisses),
+        extras: [...original.extras, ...nextResult.extras],
+        accuracy: (targets.length - remainingMisses) / targets.length,
+        meanAbsoluteDeltaBeats: nextResult.meanAbsoluteDeltaBeats,
+      });
+    } else {
+      setResult(nextResult);
+    }
+    setStatus("completed");
+    setFeedback("练习完成，今天的节拍已经稳稳落在手上。");
+  }, [targets.length]);
 
   const runAnimation = useCallback((transport: PracticeTransport) => {
     const tick = () => {
@@ -227,50 +305,89 @@ function RhythmLesson() {
     rafRef.current = requestAnimationFrame(tick);
   }, [finish]);
 
-  const begin = useCallback(async () => {
+  const begin = useCallback(async (nextTargets: StaffRhythmTarget[] = targets, phase: "main" | "recovery" = "main") => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     await transportRef.current?.stop();
-    const transport = new PracticeTransport({ bpm: 60, totalBeats: PHRASE_BEATS * 2, countInBeats: 3 });
+    const finalTarget = nextTargets.at(-1);
+    const totalBeats = Math.max(2, (finalTarget?.beat ?? 0) + (finalTarget?.durationBeats ?? 1) + 0.5);
+    const transport = new PracticeTransport({ bpm: 60, totalBeats, countInBeats: 1.5 });
     transportRef.current = transport;
     const context = await transport.start();
+    activeTargetsRef.current = nextTargets;
+    attemptTotalRef.current = totalBeats;
+    phaseRef.current = phase;
+    setPhase(phase);
     tapsRef.current = [];
     matchedRef.current = new Set();
     finishedRef.current = false;
+    setActiveTargets(nextTargets);
     setMatchedIds(new Set());
-    setResult(null);
-    setCurrentBeat(-3);
+    if (phase === "main") {
+      mainResultRef.current = null;
+      setResult(null);
+      setRetryTargets([]);
+    }
+    setCurrentBeat(-1.5);
     setStatus("running");
     setActiveMidi(null);
-    setFeedback("先听三拍倒数，然后跟着五线谱上的色块弹两轮。 ");
+    setTimingToast("");
+    setFeedback(phase === "main" ? "跟着流动的音符，按自己的节奏来弹。" : "只练刚才错过的地方。");
 
-    const secondsPerBeat = beatsToSeconds(1, 60);
-    for (let beat = -3; beat < PHRASE_BEATS * 2; beat += 1) {
-      scheduleMetronome(context, transport.startTime + beat * secondsPerBeat, beat % 3 === 0);
+    if (context.state === "running") {
+      const secondsPerBeat = beatsToSeconds(1, 60);
+      for (let beat = -1; beat < totalBeats; beat += 1) {
+        scheduleMetronome(context, transport.startTime + beat * secondsPerBeat, beat % 3 === 0);
+      }
     }
     runAnimation(transport);
-  }, [runAnimation]);
+  }, [runAnimation, targets]);
+
+  useEffect(() => {
+    if (autoStartedRef.current) return;
+    autoStartedRef.current = true;
+    void begin(targets, "main");
+  }, [begin, targets]);
+
+  useEffect(() => {
+    if (status !== "recovery-prompt" || exitOpen || retryTargets.length === 0) return;
+    recoveryTimerRef.current = window.setTimeout(() => {
+      void begin(retryTargets, "recovery");
+    }, 2100);
+    return () => {
+      if (recoveryTimerRef.current !== null) window.clearTimeout(recoveryTimerRef.current);
+    };
+  }, [begin, exitOpen, retryTargets, status]);
 
   const tap = useCallback((midi = 60) => {
     const transport = transportRef.current;
     if (!transport || status !== "running") return;
     const beat = transport.beat();
-    if (beat < 0 || beat >= PHRASE_BEATS * 2) return;
+    if (beat < 0 || beat >= attemptTotalRef.current) return;
     const tapEvent = { id: `tap-${tapsRef.current.length + 1}`, beat };
     tapsRef.current.push(tapEvent);
+    void transport.context?.resume();
+    if (transport.context) scheduleMidiTone(transport.context, midi, transport.context.currentTime, 0.28, 0.11);
     setActiveMidi(midi);
+    setHitSerial((value) => value + 1);
     if (activeTimerRef.current !== null) window.clearTimeout(activeTimerRef.current);
-    activeTimerRef.current = window.setTimeout(() => setActiveMidi(null), 170);
-    const nearest = findNearestRhythmTarget(targets, beat, matchedRef.current);
+    activeTimerRef.current = window.setTimeout(() => setActiveMidi(null), 220);
+    const nearest = findNearestRhythmTarget(activeTargetsRef.current, beat, matchedRef.current);
     if (!nearest) {
-      setFeedback("再等等，让色块更靠近青色线。 ");
+      setTimingToast("再等等");
+      setFeedback("再等等，让色块更靠近判定线。");
+      if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = window.setTimeout(() => setTimingToast(""), 650);
       return;
     }
     matchedRef.current.add(nearest.target.id);
     setMatchedIds(new Set(matchedRef.current));
     const absolute = Math.abs(nearest.delta);
-    setFeedback(absolute <= 0.14 ? "正好！" : nearest.delta < 0 ? "稍微早了一点" : "稍微晚了一点");
-    if (transport.context) scheduleMidiTone(transport.context, midi, transport.context.currentTime, 0.24, 0.1);
-  }, [status, targets]);
+    const nextFeedback = absolute <= 0.14 ? "正好！" : nearest.delta < 0 ? "早了一点" : "晚了一点";
+    setTimingToast(nextFeedback);
+    setFeedback(nextFeedback);
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setTimingToast(""), 650);
+  }, [status]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -299,74 +416,126 @@ function RhythmLesson() {
       await transport.pause();
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
       setStatus("paused");
-      setFeedback("练习已暂停，准备好后从这里继续。 ");
+      setFeedback("练习已暂停，准备好后从这里继续。");
     }
+  }
+
+  async function openExitDialog() {
+    resumeAfterExitRef.current = status === "running";
+    if (status === "running") {
+      await transportRef.current?.pause();
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      setStatus("paused");
+    }
+    setExitOpen(true);
+  }
+
+  async function continuePractice() {
+    setExitOpen(false);
+    if (!resumeAfterExitRef.current) return;
+    const transport = transportRef.current;
+    if (!transport) return;
+    await transport.resume();
+    setStatus("running");
+    runAnimation(transport);
   }
 
   const pass = Boolean(result && result.accuracy >= 0.8);
   const accuracyPercent = result ? Math.round(result.accuracy * 100) : 0;
-  const progress = Math.max(0, Math.min(1, currentBeat / (PHRASE_BEATS * 2)));
-  const countdown = currentBeat < 0 ? Math.max(1, Math.ceil(-currentBeat)) : null;
-  const suggestedMidi = status === "running" && currentBeat >= 0
-    ? targets.find((target) => target.beat >= currentBeat - 0.24 && !matchedIds.has(target.id))?.midi ?? null
-    : status === "ready" ? targets[0]?.midi ?? null : null;
+  const finalVisibleTarget = activeTargets.at(-1);
+  const visibleAttemptTotal = Math.max(2, (finalVisibleTarget?.beat ?? 0) + (finalVisibleTarget?.durationBeats ?? 1) + 0.5);
+  const attemptProgress = Math.max(0, Math.min(1, currentBeat / visibleAttemptTotal));
+  const progress = status === "completed"
+    ? 1
+    : phase === "recovery"
+      ? 0.86 + attemptProgress * 0.14
+      : attemptProgress * 0.86;
+  const showInstruction = status === "booting" || (status === "running" && currentBeat < 0.5);
 
   return (
-    <section className="lesson-card rhythm-card" aria-labelledby="lesson-title">
-      <div className="lesson-kicker">节奏跟弹 · 60 BPM</div>
-      <h1 id="lesson-title">跟上月光节拍</h1>
-      <p className="lesson-lead" aria-live="polite">{feedback}</p>
-
-      <div className="lesson-progress"><i style={{ transform: `scaleX(${progress})` }} /></div>
-      <div className="rhythm-stage">
-        <RhythmLane targets={targets} currentBeat={currentBeat} matchedIds={matchedIds} />
-        {countdown && status === "running" ? <div className="countdown" aria-live="assertive">{countdown}</div> : null}
+    <main className="rhythm-practice-screen" aria-labelledby="lesson-title">
+      <div className="immersive-progress" role="progressbar" aria-label="练习进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress * 100)}>
+        <i style={{ transform: `scaleX(${progress})` }} />
+        <b key={hitSerial} className={hitSerial ? "burst" : ""} style={{ left: `${Math.max(2, progress * 100)}%` }} aria-hidden="true" />
       </div>
 
-      <div className="rhythm-piano">
-        <VirtualPiano
-          activeMidi={activeMidi}
-          hintMidi={suggestedMidi}
-          disabled={status !== "running" || currentBeat < 0}
-          onNote={(midi) => tap(midi)}
-        />
-      </div>
+      <button type="button" className="immersive-exit" aria-label="退出练习" onClick={() => void openExitDialog()}><X size={40} weight="bold" /></button>
 
-      {status !== "completed" ? (
-        <div className="rhythm-controls">
-          <span className="rhythm-input-note">{status === "running" ? "任意琴键都算一次落点 · 本关只评分节奏" : "开始后，钢琴会在三拍倒数结束时解锁"}</span>
-          <div className="practice-actions">
-            {status === "ready" ? (
-              <button type="button" className="moon-primary" onClick={() => void begin()}><Play size={19} weight="fill" />开始练习</button>
-            ) : (
-              <>
-                <button type="button" className="moon-secondary" onClick={() => void togglePause()}>
-                  {status === "paused" ? <Play size={18} weight="fill" /> : <Pause size={18} weight="fill" />}
-                  {status === "paused" ? "继续" : "暂停"}
-                </button>
-                <button type="button" className="moon-secondary" onClick={() => void begin()}><ArrowCounterClockwise size={18} />重来</button>
-              </>
-            )}
+      {status !== "recovery-prompt" ? (
+        <div className="practice-playfield">
+          <h1 id="lesson-title" className={showInstruction ? "practice-instruction visible" : "practice-instruction"}>按自己的节奏来弹</h1>
+          <div className="immersive-staff">
+            <RhythmLane
+              targets={activeTargets}
+              currentBeat={currentBeat}
+              matchedIds={matchedIds}
+              showTimeSignature={showInstruction}
+            />
           </div>
+          <div className="immersive-piano">
+            <VirtualPiano
+              activeMidi={activeMidi}
+              disabled={status !== "running" || currentBeat < 0}
+              hitSerial={hitSerial}
+              onNote={(midi) => tap(midi)}
+            />
+          </div>
+          <div key={timingToast} className={timingToast ? "timing-toast visible" : "timing-toast"} aria-hidden={!timingToast}>{timingToast}</div>
         </div>
       ) : (
-        <div className={`rhythm-result ${pass ? "passed" : "retry"}`}>
-          <div className="result-score"><strong>{accuracyPercent}%</strong><span>节奏达标率</span></div>
-          <div className="result-copy">
-            <b>{pass ? "本关完成" : "再练一次就会更稳"}</b>
-            <span>命中 {result?.matches.length ?? 0} / {targets.length}，多按 {result?.extras.length ?? 0} 次。</span>
-          </div>
-          <div className="result-actions">
-            <button type="button" className="moon-secondary" onClick={() => void begin()}><ArrowCounterClockwise size={18} />再练一次</button>
-            {pass ? <Link className="moon-primary" href="/">完成阶段 1 <ArrowRight size={18} /></Link> : null}
-          </div>
+        <div className="recovery-coach" role="status">
+          <img src="/assets/moon-panda-coach.png" alt="月月教练" />
+          <div><strong>来重练一下</strong><span>刚才错过的 {retryTargets.length} 个地方</span></div>
         </div>
       )}
-    </section>
+
+      {status === "paused" && !exitOpen ? (
+        <button type="button" className="paused-resume" onClick={() => void togglePause()}><Play size={24} weight="fill" />继续练习</button>
+      ) : null}
+
+      <button type="button" className={trayOpen ? "edge-handle open" : "edge-handle"} aria-label={trayOpen ? "收起练习控制" : "展开练习控制"} onClick={() => setTrayOpen((value) => !value)}>
+        {trayOpen ? <CaretRight size={34} weight="bold" /> : <CaretLeft size={34} weight="bold" />}
+      </button>
+      <div className={trayOpen ? "practice-tray open" : "practice-tray"} aria-hidden={!trayOpen}>
+        <button type="button" onClick={() => void togglePause()}>{status === "paused" ? <Play weight="fill" /> : <Pause weight="fill" />}<span>{status === "paused" ? "继续" : "暂停"}</span></button>
+        <button type="button" onClick={() => void begin(targets, "main")}><ArrowCounterClockwise /><span>重来</span></button>
+      </div>
+
+      {exitOpen ? (
+        <div className="practice-dialog-backdrop">
+          <section className="practice-exit-dialog" role="dialog" aria-modal="true" aria-labelledby="exit-title">
+            <img src="/assets/moon-panda-coach.png" alt="" />
+            <h2 id="exit-title">别走，只差一点就完成了！</h2>
+            <div className="dialog-actions">
+              <Link href="/" className="dialog-quit">退出</Link>
+              <button type="button" onClick={() => void continuePractice()}>继续努力</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {status === "completed" && result ? (
+        <div className="practice-dialog-backdrop completion-backdrop">
+          <section className="practice-complete-dialog" role="dialog" aria-labelledby="complete-title">
+            <CheckCircle size={54} weight="fill" />
+            <div><span>节奏达标率</span><strong>{accuracyPercent}%</strong></div>
+            <h2 id="complete-title">{pass ? "稳稳接住了每一个落点" : "再来一遍，手感会更稳"}</h2>
+            <p>命中 {Math.min(targets.length, result.matches.length)} / {targets.length} · 多按 {result.extras.length} 次</p>
+            <div className="dialog-actions">
+              <button type="button" className="dialog-retry" onClick={() => void begin(targets, "main")}><ArrowCounterClockwise size={20} />再练一次</button>
+              <Link href="/">完成练习 <ArrowRight size={20} /></Link>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      <p className="sr-only" aria-live="polite">{feedback}</p>
+    </main>
   );
 }
 
 export function StageOnePractice({ lessonId }: StageOnePracticeProps) {
+  if (lessonId === "B1-02") return SHOW_STATIC_SCORE_REVIEW ? <StaticScoreReview /> : <RhythmLesson />;
   const step = lessonId === "B1-01" ? 1 : 2;
   return (
     <main className="practice-experience">
@@ -380,7 +549,7 @@ export function StageOnePractice({ lessonId }: StageOnePracticeProps) {
         </div>
         <div className="practice-brand">月光琴房</div>
       </header>
-      {lessonId === "B1-01" ? <ListenLesson /> : <RhythmLesson />}
+      <ListenLesson />
       <p className="practice-footnote">第 6–7 小节 · 先听见，再弹出来</p>
     </main>
   );

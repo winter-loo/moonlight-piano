@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, type CSSProperties } from "react";
 
 type PianoKey = {
   midi: number;
@@ -15,6 +15,7 @@ type VirtualPianoProps = {
   wrongMidi?: number | null;
   hintMidi?: number | null;
   disabled?: boolean;
+  hitSerial?: number;
   onNote: (midi: number) => void;
 };
 
@@ -41,9 +42,26 @@ const BLACK_KEYS: PianoKey[] = [
   { midi: 75, label: "D♯", shortcut: "P", black: true, afterWhite: 8 },
 ];
 
-const NOTE_COLORS = ["#f47e86", "#e99b42", "#72b660", "#27bf99", "#7f9df4", "#ba7add", "#dd7fb3"];
+const NOTE_COLORS: Record<number, string> = {
+  0: "#cb68f2",
+  1: "#cb68f2",
+  2: "#ff9d18",
+  3: "#ff9d18",
+  4: "#6dda3c",
+  5: "#dd168d",
+  6: "#dd168d",
+  7: "#7f96ff",
+  8: "#f064b9",
+  9: "#f064b9",
+  10: "#2bd8a5",
+  11: "#2bd8a5",
+};
 
-export function VirtualPiano({ activeMidi, wrongMidi = null, hintMidi = null, disabled = false, onNote }: VirtualPianoProps) {
+function noteColor(midi: number) {
+  return NOTE_COLORS[midi % 12] ?? "#7f96ff";
+}
+
+export function VirtualPiano({ activeMidi, wrongMidi = null, hintMidi = null, disabled = false, hitSerial = 0, onNote }: VirtualPianoProps) {
   const keys = useMemo(() => [...WHITE_KEYS, ...BLACK_KEYS], []);
   const shortcutMap = useMemo(() => new Map(keys.map((key) => [key.shortcut, key.midi])), [keys]);
 
@@ -74,16 +92,20 @@ export function VirtualPiano({ activeMidi, wrongMidi = null, hintMidi = null, di
   return (
     <div className="echo-piano" aria-label="可弹奏的虚拟钢琴，覆盖 C4 到 E5">
       <div className="echo-white-keys">
-        {WHITE_KEYS.map((key, index) => (
+        {WHITE_KEYS.map((key) => (
           <button
             type="button"
-            key={key.midi}
+            key={`${key.midi}-${activeMidi === key.midi ? hitSerial : 0}`}
             className={`echo-key echo-white-key ${stateClass(key.midi)}`}
+            style={{ "--key-color": noteColor(key.midi) } as CSSProperties}
             onPointerDown={(event) => { event.preventDefault(); trigger(key.midi); }}
             aria-label={`${key.label}，电脑键盘 ${key.shortcut}`}
             disabled={disabled}
           >
-            <span style={{ color: NOTE_COLORS[index % NOTE_COLORS.length] }}>{key.label}</span>
+            <i className="key-spark spark-one" aria-hidden="true" />
+            <i className="key-spark spark-two" aria-hidden="true" />
+            <i className="key-spark spark-three" aria-hidden="true" />
+            <span style={{ color: noteColor(key.midi) }}>{key.label}</span>
             <small>{key.shortcut}</small>
           </button>
         ))}
@@ -92,14 +114,20 @@ export function VirtualPiano({ activeMidi, wrongMidi = null, hintMidi = null, di
         {BLACK_KEYS.map((key) => (
           <button
             type="button"
-            key={key.midi}
+            key={`${key.midi}-${activeMidi === key.midi ? hitSerial : 0}`}
             className={`echo-key echo-black-key ${stateClass(key.midi)}`}
-            style={{ left: `calc(${((key.afterWhite ?? 0) + 1) * 10}% - 4.1%)` }}
+            style={{
+              left: `calc(${((key.afterWhite ?? 0) + 1) * 10}% - 4.1%)`,
+              "--key-color": noteColor(key.midi),
+            } as CSSProperties}
             onPointerDown={(event) => { event.preventDefault(); trigger(key.midi); }}
             aria-label={`${key.label}，电脑键盘 ${key.shortcut}`}
             disabled={disabled}
           >
-            <span>{key.label}</span>
+            <i className="key-spark spark-one" aria-hidden="true" />
+            <i className="key-spark spark-two" aria-hidden="true" />
+            <i className="key-spark spark-three" aria-hidden="true" />
+            <span style={{ color: noteColor(key.midi) }}>{key.label}</span>
             <small>{key.shortcut}</small>
           </button>
         ))}

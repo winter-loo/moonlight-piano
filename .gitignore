@@ -41,3 +41,9 @@ next-env.d.ts
 /outputs/
 /work/
 /tmp/
+
+# python & tools cache
+__pycache__/
+*.pyc
+androguard.db
+androguard.log
