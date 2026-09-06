@@ -28,7 +28,7 @@ permissions:
 jobs:
   validate-and-ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -38,6 +38,12 @@ jobs:
       - run: npm ci
       - name: Focused registry tests
         run: node --experimental-strip-types --test tests/unit/acoustic-data-registry.test.mjs
+      - name: Full unit suite
+        run: npm test
+      - name: Lint application and registry code
+        run: npm run lint
+      - name: Production build
+        run: npm run build
       - name: Validate fail-closed registry
         run: npm run acoustic:validate
       - name: Reproducibly ingest the commercially usable C4 probe
