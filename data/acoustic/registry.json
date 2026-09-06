@@ -44,7 +44,8 @@
           "expectedBytes": 78718,
           "integrity": {
             "algorithm": "git-sha1",
-            "value": "d5f5819d32641247e33a452df3c81bd3f71422e8"
+            "value": "d5f5819d32641247e33a452df3c81bd3f71422e8",
+            "sha256": "689eaa4c2fd7f29a2cc0e386eec462156d523a87d701269e5e2458e66056f4f6"
           },
           "commitPolicy": "never-commit"
         },
@@ -57,7 +58,8 @@
           "expectedBytes": 1883,
           "integrity": {
             "algorithm": "git-sha1",
-            "value": "e4e2029ff09dde8fc34f143dc035f1714b98cfdb"
+            "value": "e4e2029ff09dde8fc34f143dc035f1714b98cfdb",
+            "sha256": "04ddba91bcafcb4c53dee7b004479f79af47bb92574f06bbe741b00c3ca64e0e"
           },
           "commitPolicy": "never-commit"
         }

@@ -11,6 +11,11 @@ const DEFAULT_POLICY = path.join(ROOT, "data/acoustic/license-policy.json");
 const DEFAULT_SPLITS = path.join(ROOT, "data/acoustic/development-splits.json");
 const DEFAULT_HOLDOUT = path.join(ROOT, "data/acoustic/holdout/protocol.json");
 const SOURCE_STATUSES = new Set(["product-eligible", "research-only", "blocked"]);
+const MODEL_PARAMETER_FITTING_POLICIES = new Set([
+  "allowed-with-attribution",
+  "legal-clearance-required",
+  "research-only",
+]);
 const ASSET_ROLES = new Set([
   "calibration",
   "development-validation",
@@ -48,6 +53,7 @@ export function validateRegistryDocument(registry, policy, splits, holdout) {
   if (policy?.schemaVersion !== 1 || !plainObject(policy?.licenses)) {
     errors.push("license policy is missing or unsupported");
   }
+  validateLicensePolicy(policy, errors);
 
   const sourceIds = new Set();
   const assetsByReference = new Map();
@@ -103,10 +109,18 @@ export function validateRegistryDocument(registry, policy, splits, holdout) {
       else assetIds.add(asset.id);
       if (!ASSET_ROLES.has(asset?.role)) errors.push(`${assetPrefix}: invalid role`);
       if (!nonEmpty(asset?.kind) || !nonEmpty(asset?.fileName)) errors.push(`${assetPrefix}: kind and fileName are required`);
-      if (!isPinnedHttpsUrl(asset?.url)) errors.push(`${assetPrefix}: URL must be HTTPS and pinned to a 40-character commit`);
+      const pinnedUrlError = validatePinnedAssetUrl(
+        asset?.url,
+        source?.origin?.distributionRepository,
+        source?.origin?.distributionCommit,
+      );
+      if (pinnedUrlError) errors.push(`${assetPrefix}: ${pinnedUrlError}`);
       if (!Number.isSafeInteger(asset?.expectedBytes) || asset.expectedBytes <= 0) errors.push(`${assetPrefix}: expectedBytes must be positive`);
       if (asset?.integrity?.algorithm !== "git-sha1" || !/^[0-9a-f]{40}$/.test(asset?.integrity?.value ?? "")) {
         errors.push(`${assetPrefix}: a valid git-sha1 checksum is required`);
+      }
+      if (!/^[0-9a-f]{64}$/.test(asset?.integrity?.sha256 ?? "")) {
+        errors.push(`${assetPrefix}: a registered sha256 checksum is required`);
       }
       if (asset?.commitPolicy !== "never-commit") errors.push(`${assetPrefix}: raw assets must use never-commit policy`);
       const reference = `${source.id}:${asset.id}`;
@@ -124,6 +138,25 @@ export function validateRegistryDocument(registry, policy, splits, holdout) {
   validateHoldoutProtocol(holdout, errors);
   if (errors.length > 0) throw new RegistryError(errors.join("\n"));
   return { registry, policy, splits, holdout, assetsByReference };
+}
+
+function validateLicensePolicy(policy, errors) {
+  if (!plainObject(policy?.licenses)) return;
+  const entries = Object.entries(policy.licenses);
+  if (entries.length === 0) errors.push("license policy must define at least one license");
+  for (const [spdx, rule] of entries) {
+    const prefix = `license policy ${spdx}`;
+    if (!nonEmpty(spdx) || !plainObject(rule)) {
+      errors.push(`${prefix}: rule must be an object`);
+      continue;
+    }
+    for (const key of ["commercialUse", "attributionRequired", "shareAlike"]) {
+      if (typeof rule[key] !== "boolean") errors.push(`${prefix}: ${key} must be boolean`);
+    }
+    if (!MODEL_PARAMETER_FITTING_POLICIES.has(rule.modelParameterFitting)) {
+      errors.push(`${prefix}: modelParameterFitting must be a supported policy value`);
+    }
+  }
 }
 
 function validateOrigin(origin, prefix, errors) {
@@ -174,6 +207,7 @@ function validateHoldoutProtocol(holdout, errors) {
   if (holdout?.access?.reveal !== "one-shot-after-candidate-freeze") errors.push("holdout reveal must be one-shot after candidate freeze");
   if (holdout?.access?.preDecisionOutput !== "aggregate-pass-fail-only") errors.push("holdout may reveal only aggregate pass/fail before the release decision");
   if (holdout?.commitment?.requiredBeforeFormalEvaluation !== true || holdout?.commitment?.algorithm !== "sha256") errors.push("holdout commitment must be required and use sha256");
+  if (holdout?.commitment?.candidateArtifactRequired !== true || holdout?.commitment?.candidateArtifactAlgorithm !== "sha256") errors.push("holdout commitment must bind the frozen candidate artifact with sha256");
   if (holdout?.failurePolicy?.inspectedDataPermanentlyLeavesOuterTest !== true) errors.push("inspected data must permanently leave the outer test");
   if (holdout?.failurePolicy?.repartitionDoesNotRestoreIndependence !== true) errors.push("holdout policy must forbid independence by repartitioning");
   if (!nonEmpty(holdout?.failurePolicy?.nextCandidateRequires)) errors.push("holdout must define evidence requirements for the next candidate after failure");
@@ -232,23 +266,31 @@ export async function ingestSource({ sourceId, outputRoot, fetchImpl = fetch }) 
 
 export function verifyAssetBuffer(sourceId, asset, buffer) {
   if (buffer.length !== asset.expectedBytes) throw new RegistryError(`${sourceId}:${asset.id} byte length changed: expected ${asset.expectedBytes}, got ${buffer.length}`, "INTEGRITY_MISMATCH");
-  const actual = gitBlobSha1(buffer);
-  if (actual !== asset.integrity.value) throw new RegistryError(`${sourceId}:${asset.id} checksum changed: expected ${asset.integrity.value}, got ${actual}`, "INTEGRITY_MISMATCH");
+  const actualGitSha1 = gitBlobSha1(buffer);
+  if (actualGitSha1 !== asset.integrity.value) throw new RegistryError(`${sourceId}:${asset.id} git-sha1 changed: expected ${asset.integrity.value}, got ${actualGitSha1}`, "INTEGRITY_MISMATCH");
+  const actualSha256 = sha256(buffer);
+  if (actualSha256 !== asset.integrity.sha256) throw new RegistryError(`${sourceId}:${asset.id} sha256 changed: expected ${asset.integrity.sha256}, got ${actualSha256}`, "INTEGRITY_MISMATCH");
 }
 
-export async function sealHoldoutManifest({ manifestPath, candidateId, metricPlanPath, outputPath, custodian }) {
+export async function sealHoldoutManifest({ manifestPath, candidateId, candidateArtifactPath, metricPlanPath, outputPath, custodian }) {
   const absoluteManifest = path.resolve(manifestPath);
   const relativeToRoot = path.relative(ROOT, absoluteManifest);
   if (!relativeToRoot.startsWith("..") && !path.isAbsolute(relativeToRoot)) {
     throw new RegistryError("private holdout manifest must live outside the repository", "HOLDOUT_EXPOSURE_RISK");
   }
   if (!nonEmpty(candidateId) || !nonEmpty(custodian)) throw new RegistryError("candidateId and custodian are required", "HOLDOUT_INVALID");
-  const [manifest, metricPlan] = await Promise.all([readFile(absoluteManifest), readFile(path.resolve(metricPlanPath))]);
+  const [manifest, candidateArtifact, metricPlan] = await Promise.all([
+    readFile(absoluteManifest),
+    readFile(path.resolve(candidateArtifactPath)),
+    readFile(path.resolve(metricPlanPath)),
+  ]);
   const receipt = {
     schemaVersion: 1,
     protocolId: "professional-piano-outer-test-v1",
     candidateId,
     custodian,
+    candidateArtifactSha256: sha256(candidateArtifact),
+    candidateArtifactBytes: candidateArtifact.length,
     manifestSha256: sha256(manifest),
     metricPlanSha256: sha256(metricPlan),
     disclosure: "commitments only; no asset identifiers, locators, labels, or per-sample results",
@@ -321,7 +363,7 @@ function validateReceipt(source, receipt) {
       || received.expectedBytes !== registered.expectedBytes
       || received.actualBytes !== registered.expectedBytes
       || received.gitSha1 !== registered.integrity.value
-      || !/^[0-9a-f]{64}$/.test(received.sha256 ?? "")) {
+      || received.sha256 !== registered.integrity.sha256) {
       throw new RegistryError(`${source.id}:${registered.id}: ingestion receipt does not prove the registered bytes`, "RECEIPT_INVALID");
     }
   }
@@ -380,8 +422,25 @@ function isoDate(value) {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
 }
 
-function isPinnedHttpsUrl(value) {
-  return typeof value === "string" && value.startsWith("https://") && /\/[0-9a-f]{40}\//.test(value);
+function validatePinnedAssetUrl(value, repository, commit) {
+  if (typeof value !== "string" || !nonEmpty(repository) || !/^[0-9a-f]{40}$/.test(commit ?? "")) {
+    return "URL, repository, and immutable commit are required";
+  }
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return "URL must be valid";
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname !== "raw.githubusercontent.com") {
+    return "URL must use HTTPS raw.githubusercontent.com distribution";
+  }
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  if (segments.length < 4) return "URL must contain owner, repository, commit, and asset path";
+  const urlRepository = `${segments[0]}/${segments[1]}`;
+  if (urlRepository !== repository) return `URL repository ${urlRepository} does not match declared ${repository}`;
+  if (segments[2] !== commit) return `URL commit ${segments[2]} does not match declared ${commit}`;
+  return null;
 }
 
 async function readJson(filePath) {
@@ -425,10 +484,11 @@ async function cli() {
     return;
   }
   if (command === "seal-holdout") {
-    for (const required of ["manifest", "candidate", "metric-plan", "output", "custodian"]) if (!options[required]) throw new RegistryError(`--${required} is required`, "CLI_INVALID");
+    for (const required of ["manifest", "candidate", "candidate-artifact", "metric-plan", "output", "custodian"]) if (!options[required]) throw new RegistryError(`--${required} is required`, "CLI_INVALID");
     const receipt = await sealHoldoutManifest({
       manifestPath: options.manifest,
       candidateId: options.candidate,
+      candidateArtifactPath: options["candidate-artifact"],
       metricPlanPath: options["metric-plan"],
       outputPath: options.output,
       custodian: options.custodian,

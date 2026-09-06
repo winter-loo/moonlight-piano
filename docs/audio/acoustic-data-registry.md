@@ -76,11 +76,14 @@ A custodian can publish a commitment without disclosing the manifest:
 node scripts/acoustic-data-registry.mjs seal-holdout \
   --manifest /outside-the-repository/private-manifest.json \
   --candidate candidate-001 \
+  --candidate-artifact /outside-the-repository/candidate-001.mlpiano \
   --metric-plan /outside-the-repository/frozen-metrics.json \
   --custodian independent-reviewer \
   --output work/acoustic-data/holdout-commitment.json
 ```
 
 The command refuses a private manifest located inside the repository and writes
-only SHA-256 commitments and release identifiers, never sample names, URLs,
-labels, or per-sample results.
+only SHA-256 commitments for the private manifest, frozen candidate artifact,
+and metric plan plus release identifiers—never sample names, URLs, labels, or
+per-sample results. Rebuilding the candidate changes its commitment and requires
+a new sealed evaluation.

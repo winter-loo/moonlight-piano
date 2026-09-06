@@ -22,7 +22,9 @@
   "commitment": {
     "requiredBeforeFormalEvaluation": true,
     "algorithm": "sha256",
-    "publicReceiptPath": "work/acoustic-data/holdout-commitment.json"
+    "publicReceiptPath": "work/acoustic-data/holdout-commitment.json",
+    "candidateArtifactRequired": true,
+    "candidateArtifactAlgorithm": "sha256"
   },
   "failurePolicy": {
     "inspectedDataPermanentlyLeavesOuterTest": true,
