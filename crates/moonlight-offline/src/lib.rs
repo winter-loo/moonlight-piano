@@ -176,7 +176,12 @@ pub fn render_to_files(config: &RenderConfig) -> Result<RenderMetrics, OfflineEr
     let wav_path = config.output_dir.join("c4-reference.wav");
     let quantized = write_pcm16_wav(&wav_path, config.sample_rate_hz, &samples)?;
     let metrics = calculate_metrics(config.sample_rate_hz, &samples, &quantized);
-    write_report(&config.output_dir.join("c4-report.json"), config, &pack.instrument_id, &metrics)?;
+    write_report(
+        &config.output_dir.join("c4-report.json"),
+        config,
+        &pack.instrument_id,
+        &metrics,
+    )?;
     write_energy_csv(
         &config.output_dir.join("c4-energy.csv"),
         config.sample_rate_hz,
@@ -212,7 +217,11 @@ fn validate_config(config: &RenderConfig) -> Result<(), OfflineError> {
     Ok(())
 }
 
-fn write_pcm16_wav(path: &Path, sample_rate_hz: u32, samples: &[f32]) -> Result<Vec<i16>, OfflineError> {
+fn write_pcm16_wav(
+    path: &Path,
+    sample_rate_hz: u32,
+    samples: &[f32],
+) -> Result<Vec<i16>, OfflineError> {
     let quantized: Vec<i16> = samples
         .iter()
         .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
@@ -368,8 +377,7 @@ mod tests {
 
     #[test]
     fn parses_timestamped_events() {
-        let events = parse_events("0,note_on,60,0.8\n48000,note_off,60,0.5\n", 96_000)
-            .unwrap();
+        let events = parse_events("0,note_on,60,0.8\n48000,note_off,60,0.5\n", 96_000).unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].frame, 48_000);
     }
@@ -383,10 +391,6 @@ mod tests {
     #[test]
     fn rejects_out_of_range_and_unordered_events() {
         assert!(parse_events("100,note_on,60,0.8\n", 100).is_err());
-        assert!(parse_events(
-            "10,note_on,60,0.8\n5,note_off,60,0.5\n",
-            100
-        )
-        .is_err());
+        assert!(parse_events("10,note_on,60,0.8\n5,note_off,60,0.5\n", 100).is_err());
     }
 }
