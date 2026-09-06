@@ -13,7 +13,10 @@
     "test:all": "npm run test && npm run build",
     "visual:diff": "node scripts/visual-diff.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "acoustic:validate": "node scripts/acoustic-data-registry.mjs validate",
+    "acoustic:ingest:salamander": "node scripts/acoustic-data-registry.mjs ingest --source salamander-tonejs-c4 --output work/acoustic-data",
+    "acoustic:report": "node scripts/acoustic-data-registry.mjs report --receipts work/acoustic-data/receipts --output work/acoustic-data/provenance-report"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",

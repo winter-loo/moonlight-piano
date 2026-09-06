@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "roles": {
+    "calibration": [
+      "salamander-tonejs-c4:c4-mp3"
+    ],
+    "developmentValidation": [],
+    "crossPianoValidation": [],
+    "immutableOuterTest": {
+      "protocolRef": "data/acoustic/holdout/protocol.json",
+      "assetReferencesCommitted": false
+    }
+  }
+}

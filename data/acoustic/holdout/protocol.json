@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "professional-piano-outer-test-v1",
+  "role": "immutable-outer-test",
+  "status": "protocol-ready",
+  "storage": "external-custodian",
+  "repositoryContainsData": false,
+  "repositoryContainsLocators": false,
+  "candidateFreezeRequired": true,
+  "access": {
+    "permittedActors": [
+      "release-gate-custodian"
+    ],
+    "deniedActors": [
+      "developers",
+      "tuning-agents",
+      "automation-agents"
+    ],
+    "reveal": "one-shot-after-candidate-freeze",
+    "preDecisionOutput": "aggregate-pass-fail-only"
+  },
+  "commitment": {
+    "requiredBeforeFormalEvaluation": true,
+    "algorithm": "sha256",
+    "publicReceiptPath": "work/acoustic-data/holdout-commitment.json",
+    "candidateArtifactRequired": true,
+    "candidateArtifactAlgorithm": "sha256"
+  },
+  "failurePolicy": {
+    "inspectedDataPermanentlyLeavesOuterTest": true,
+    "repartitionDoesNotRestoreIndependence": true,
+    "nextCandidateRequires": "a still-sealed partition or newly collected never-inspected data"
+  }
+}
