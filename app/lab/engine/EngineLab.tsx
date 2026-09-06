@@ -9,7 +9,7 @@ import {
   createBrowserSoundEngine,
   type BrowserSoundEngineId,
 } from "@/lib/audio/engine-registry";
-import { scheduleMetronome, scheduleMidiTone } from "@/lib/audio/scheduler";
+import { scheduleMetronome } from "@/lib/audio/scheduler";
 import { NOW, type SoundEngine, type SoundEngineSnapshot } from "@/lib/audio/sound-engine";
 import { PracticeTransport, type TransportSnapshot } from "@/lib/engine/transport";
 import { mariageAmourContent } from "@/lib/music/content/mariage-amour";
@@ -32,6 +32,7 @@ export function EngineLab() {
   const unsubscribeEngineRef = useRef<(() => void) | null>(null);
   const rafRef = useRef<number | null>(null);
   const logSerialRef = useRef(0);
+  const releaseTimersRef = useRef<number[]>([]);
   const frameWindowRef = useRef({ startedAt: 0, lastAt: 0, frames: 0, largestGap: 0 });
   const [selectedEngineId, setSelectedEngineId] = useState<BrowserSoundEngineId>("legacy-interactive-piano");
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
@@ -41,6 +42,8 @@ export function EngineLab() {
   const [pedals, setPedals] = useState({ sustain: 0, sostenuto: 0, unaCorda: 0 });
 
   const disposeEngine = useCallback(async () => {
+    releaseTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    releaseTimersRef.current = [];
     unsubscribeEngineRef.current?.();
     unsubscribeEngineRef.current = null;
     const engine = engineRef.current;
@@ -121,17 +124,34 @@ export function EngineLab() {
     runAnimation(transport, engine);
   }, [activateEngine, runAnimation]);
 
-  const record = useCallback((source: string, eventTimeStamp = performance.now(), notes = [60]) => {
+  const record = useCallback((source: string, eventTimeStamp = performance.now(), notes: number[] = [60]) => {
     const transport = transportRef.current;
     const engine = engineRef.current;
     if (!transport || !engine) return;
     const at = engine.clock().currentTimeSeconds;
-    for (const [index, note] of notes.entries()) {
-      scheduleMidiTone(engine, note, at, 0.32, 0.08, `lab-${source}-${logSerialRef.current + 1}-${index}`);
-    }
-    logSerialRef.current += 1;
+    const serial = logSerialRef.current + 1;
+    const sources = notes.map((_note, index) => `lab-${source}-${serial}-${index}`);
+    engine.dispatch(notes.map((note, index) => ({
+      type: "note-on" as const,
+      sourceId: sources[index],
+      note,
+      velocity: 0.8,
+      gain: 0.24,
+      time: NOW,
+    })));
+    releaseTimersRef.current.push(window.setTimeout(() => {
+      if (engineRef.current !== engine) return;
+      engine.dispatch(notes.map((note, index) => ({
+        type: "note-off" as const,
+        sourceId: sources[index],
+        note,
+        releaseVelocity: 0.5,
+        time: NOW,
+      })));
+    }, 800));
+    logSerialRef.current = serial;
     setLogs((current) => [{
-      id: logSerialRef.current,
+      id: serial,
       source,
       beat: transport.beat(),
       performanceTime: performance.now(),
@@ -205,6 +225,7 @@ export function EngineLab() {
             <div><dt>就绪</dt><dd>{engineSnapshot?.ready ? "是" : "否"}</dd></div>
             <div><dt>活动 voice</dt><dd>{engineSnapshot?.activeVoices ?? 0}</dd></div>
             <div><dt>最后事件</dt><dd>{engineSnapshot?.lastEventType ?? "—"}</dd></div>
+            <div><dt>最后错误</dt><dd>{engineSnapshot?.lastError ?? "—"}</dd></div>
             <div><dt>路由版本</dt><dd>{engineSnapshot?.routeVersion ?? 0}</dd></div>
           </dl>
           <div className="dialog-actions">
