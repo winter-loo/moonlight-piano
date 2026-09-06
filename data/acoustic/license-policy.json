@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "licenses": {
+    "CC-BY-3.0": {
+      "commercialUse": true,
+      "modelParameterFitting": "allowed-with-attribution",
+      "attributionRequired": true,
+      "shareAlike": false
+    },
+    "CC-BY-4.0": {
+      "commercialUse": true,
+      "modelParameterFitting": "allowed-with-attribution",
+      "attributionRequired": true,
+      "shareAlike": false
+    },
+    "CC-BY-SA-4.0": {
+      "commercialUse": true,
+      "modelParameterFitting": "legal-clearance-required",
+      "attributionRequired": true,
+      "shareAlike": true
+    },
+    "CC-BY-NC-4.0": {
+      "commercialUse": false,
+      "modelParameterFitting": "research-only",
+      "attributionRequired": true,
+      "shareAlike": false
+    },
+    "CC-BY-NC-SA-4.0": {
+      "commercialUse": false,
+      "modelParameterFitting": "research-only",
+      "attributionRequired": true,
+      "shareAlike": true
+    }
+  }
+}

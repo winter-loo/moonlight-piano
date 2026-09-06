@@ -1,0 +1,58 @@
+name: acoustic-data-registry
+
+on:
+  push:
+    branches:
+      - feat/acoustic-data-registry
+    paths:
+      - "data/acoustic/**"
+      - "scripts/acoustic-data-registry.mjs"
+      - "tests/unit/acoustic-data-registry.test.mjs"
+      - "docs/audio/acoustic-data-registry.md"
+      - "package.json"
+      - ".github/workflows/acoustic-data-registry.yml"
+  pull_request:
+    paths:
+      - "data/acoustic/**"
+      - "scripts/acoustic-data-registry.mjs"
+      - "tests/unit/acoustic-data-registry.test.mjs"
+      - "docs/audio/acoustic-data-registry.md"
+      - "package.json"
+      - ".github/workflows/acoustic-data-registry.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-and-ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Focused registry tests
+        run: node --experimental-strip-types --test tests/unit/acoustic-data-registry.test.mjs
+      - name: Validate fail-closed registry
+        run: npm run acoustic:validate
+      - name: Reproducibly ingest the commercially usable C4 probe
+        run: npm run acoustic:ingest:salamander
+      - name: Produce attachable provenance report
+        run: npm run acoustic:report
+      - name: Confirm raw assets are not tracked
+        run: |
+          test -z "$(git status --short --untracked-files=all work/acoustic-data/raw)"
+          git check-ignore work/acoustic-data/raw/salamander-tonejs-c4/C4.mp3
+      - name: Upload receipts and provenance only
+        uses: actions/upload-artifact@v4
+        with:
+          name: acoustic-provenance-${{ github.sha }}
+          path: |
+            work/acoustic-data/receipts/*.json
+            work/acoustic-data/provenance-report.json
+            work/acoustic-data/provenance-report.md
+          if-no-files-found: error

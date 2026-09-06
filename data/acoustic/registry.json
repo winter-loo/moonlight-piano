@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "registryId": "moonlight-acoustic-evidence-v1",
+  "updatedAt": "2026-09-07",
+  "sources": [
+    {
+      "id": "salamander-tonejs-c4",
+      "title": "Salamander Grand Piano C4 reference probe",
+      "status": "product-eligible",
+      "origin": {
+        "creator": "Alexander Holm",
+        "instrument": "Yamaha C5 grand piano",
+        "canonicalUrl": "https://archive.org/details/SalamanderGrandPianoV3",
+        "distributionRepository": "Tonejs/audio",
+        "distributionCommit": "efd8296360f9526e379bfbe5c1698ff54d6a1d34"
+      },
+      "retrievedAt": "2026-09-07",
+      "license": {
+        "spdx": "CC-BY-3.0",
+        "evidenceAssetId": "license-readme",
+        "attribution": "Salamander Grand Piano by Alexander Holm, licensed under CC BY 3.0."
+      },
+      "permittedUse": {
+        "commercial": true,
+        "modelParameterFitting": true,
+        "runtimeDistribution": false,
+        "rawRedistribution": false,
+        "researchEvaluation": true
+      },
+      "processing": [
+        "download byte-identical assets pinned to an immutable Git commit",
+        "verify expected byte length and Git blob SHA-1 before use",
+        "record SHA-256 in the local ingestion receipt",
+        "decode and analyze only inside ignored work/acoustic-data storage",
+        "never embed or redistribute the downloaded note recording in a runtime model pack"
+      ],
+      "assets": [
+        {
+          "id": "c4-mp3",
+          "role": "calibration",
+          "kind": "audio",
+          "fileName": "C4.mp3",
+          "url": "https://raw.githubusercontent.com/Tonejs/audio/efd8296360f9526e379bfbe5c1698ff54d6a1d34/salamander/C4.mp3",
+          "expectedBytes": 78718,
+          "integrity": {
+            "algorithm": "git-sha1",
+            "value": "d5f5819d32641247e33a452df3c81bd3f71422e8"
+          },
+          "commitPolicy": "never-commit"
+        },
+        {
+          "id": "license-readme",
+          "role": "license-evidence",
+          "kind": "text",
+          "fileName": "LICENSE-AND-SOURCE.txt",
+          "url": "https://raw.githubusercontent.com/Tonejs/audio/efd8296360f9526e379bfbe5c1698ff54d6a1d34/salamander/README",
+          "expectedBytes": 1883,
+          "integrity": {
+            "algorithm": "git-sha1",
+            "value": "e4e2029ff09dde8fc34f143dc035f1714b98cfdb"
+          },
+          "commitPolicy": "never-commit"
+        }
+      ]
+    }
+  ]
+}
