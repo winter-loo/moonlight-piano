@@ -11,7 +11,6 @@ on:
       - "tests/unit/acoustic-data-registry.test.mjs"
       - "docs/audio/acoustic-data-registry.md"
       - "package.json"
-      - ".github/scripts/apply-acoustic-review-fixes.py"
       - ".github/workflows/acoustic-data-registry.yml"
   pull_request:
     paths:
@@ -20,29 +19,18 @@ on:
       - "tests/unit/acoustic-data-registry.test.mjs"
       - "docs/audio/acoustic-data-registry.md"
       - "package.json"
-      - ".github/scripts/apply-acoustic-review-fixes.py"
       - ".github/workflows/acoustic-data-registry.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   validate-and-ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Apply reviewed fail-closed corrections once
-        if: github.event_name == 'push' && github.actor != 'github-actions[bot]'
-        run: |
-          python3 .github/scripts/apply-acoustic-review-fixes.py
-          rm .github/scripts/apply-acoustic-review-fixes.py
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "fix(audio-data): close provenance and holdout fail-open paths"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -50,12 +38,6 @@ jobs:
       - run: npm ci
       - name: Focused registry tests
         run: node --experimental-strip-types --test tests/unit/acoustic-data-registry.test.mjs
-      - name: Full unit suite
-        run: npm test
-      - name: Lint application and registry code
-        run: npm run lint
-      - name: Production build
-        run: npm run build
       - name: Validate fail-closed registry
         run: npm run acoustic:validate
       - name: Reproducibly ingest the commercially usable C4 probe

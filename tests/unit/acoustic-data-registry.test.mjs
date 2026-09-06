@@ -55,6 +55,33 @@ test("missing attribution and unknown licenses fail closed", async () => {
   assert.throws(() => validateRegistryDocument(unknownLicense, policy, splits, holdout), /unknown or ambiguous license/);
 });
 
+test("license policy rules validate field types and fitting-policy enums before use", async () => {
+  const [registry, policy, splits, holdout] = await fixtureDocuments();
+  const malformed = structuredClone(policy);
+  malformed.licenses["CC-BY-NC-4.0"].commercialUse = "false";
+  delete malformed.licenses["CC-BY-NC-4.0"].modelParameterFitting;
+  assert.throws(
+    () => validateRegistryDocument(registry, malformed, splits, holdout),
+    /commercialUse must be boolean|modelParameterFitting must be a supported policy value/,
+  );
+});
+
+test("asset URLs must match the declared distribution repository and commit", async () => {
+  const [registry, policy, splits, holdout] = await fixtureDocuments();
+  const wrongCommit = structuredClone(registry);
+  wrongCommit.sources[0].origin.distributionCommit = "0".repeat(40);
+  assert.throws(
+    () => validateRegistryDocument(wrongCommit, policy, splits, holdout),
+    /URL commit .* does not match declared/,
+  );
+  const wrongRepository = structuredClone(registry);
+  wrongRepository.sources[0].origin.distributionRepository = "other/project";
+  assert.throws(
+    () => validateRegistryDocument(wrongRepository, policy, splits, holdout),
+    /URL repository .* does not match declared/,
+  );
+});
+
 test("non-commercial and uncleared share-alike sources cannot enter product fitting", async () => {
   const [registry, policy, splits, holdout] = await fixtureDocuments();
   const nonCommercial = structuredClone(registry);
@@ -87,20 +114,53 @@ test("holdout protocol rejects committed locators or developer access", async ()
   assert.throws(() => validateRegistryDocument(registry, policy, splits, exposed), /locators must remain outside|deny developers/);
 });
 
-test("sealing publishes commitments only and refuses a private manifest inside the repository", async () => {
+test("sealing binds candidate bytes and publishes commitments only", async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), "moonlight-holdout-"));
   const manifestPath = path.join(temp, "private-manifest.json");
+  const candidateArtifactPath = path.join(temp, "candidate-001.mlpiano");
   const metricPlanPath = path.join(temp, "metric-plan.json");
   const outputPath = path.join(temp, "commitment.json");
   await writeFile(manifestPath, '{"secretAsset":"never-publish.wav","label":"fail"}\n');
+  await writeFile(candidateArtifactPath, "frozen-candidate-bytes-v1\n");
   await writeFile(metricPlanPath, '{"metric":"spectral-distance","threshold":0.1}\n');
-  const receipt = await sealHoldoutManifest({ manifestPath, candidateId: "candidate-001", metricPlanPath, outputPath, custodian: "independent-reviewer" });
+  const receipt = await sealHoldoutManifest({
+    manifestPath,
+    candidateId: "candidate-001",
+    candidateArtifactPath,
+    metricPlanPath,
+    outputPath,
+    custodian: "independent-reviewer",
+  });
   const published = await readFile(outputPath, "utf8");
   assert.equal(receipt.candidateId, "candidate-001");
+  assert.match(published, /candidateArtifactSha256/);
   assert.match(published, /manifestSha256/);
-  assert.doesNotMatch(published, /never-publish|spectral-distance|"label"/);
+  assert.doesNotMatch(published, /never-publish|spectral-distance|frozen-candidate-bytes|"label"/);
+
+  await writeFile(candidateArtifactPath, "rebuilt-candidate-bytes-v2\n");
+  const rebuiltOutput = path.join(temp, "rebuilt-commitment.json");
+  const rebuilt = await sealHoldoutManifest({
+    manifestPath,
+    candidateId: "candidate-001",
+    candidateArtifactPath,
+    metricPlanPath,
+    outputPath: rebuiltOutput,
+    custodian: "independent-reviewer",
+  });
+  assert.notEqual(rebuilt.candidateArtifactSha256, receipt.candidateArtifactSha256);
+
   const inRepoManifest = path.join(ROOT, "work-would-be-private.json");
-  await assert.rejects(() => sealHoldoutManifest({ manifestPath: inRepoManifest, candidateId: "candidate-002", metricPlanPath, outputPath, custodian: "reviewer" }), /must live outside the repository/);
+  await assert.rejects(
+    () => sealHoldoutManifest({
+      manifestPath: inRepoManifest,
+      candidateId: "candidate-002",
+      candidateArtifactPath,
+      metricPlanPath,
+      outputPath,
+      custodian: "reviewer",
+    }),
+    /must live outside the repository/,
+  );
 });
 
 test("a tampered ingestion receipt cannot enter a provenance report", async () => {
@@ -120,12 +180,18 @@ test("a tampered ingestion receipt cannot enter a provenance report", async () =
       role: asset.role,
       expectedBytes: asset.expectedBytes,
       actualBytes: asset.expectedBytes,
-      gitSha1: "0".repeat(40),
+      gitSha1: asset.integrity.value,
       sha256: "0".repeat(64),
     })),
   }, null, 2)}
 `);
   await assert.rejects(() => buildProvenanceReport({ receiptsDirectory: temp }), /does not prove the registered bytes/);
+});
+
+test("CI guards every indexed raw asset and validates pushes to main", async () => {
+  const workflow = await readFile(path.join(ROOT, ".github/workflows/acoustic-data-registry.yml"), "utf8");
+  assert.match(workflow, /- main/);
+  assert.match(workflow, /git ls-files -- work\/acoustic-data\/raw/);
 });
 
 test("the provenance report is attachable without exposing raw data", async () => {
