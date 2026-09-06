@@ -77,7 +77,7 @@ impl ModelPack {
         if self.note > 127 {
             return Err(ModelError::InvalidNote);
         }
-        if !self.output_gain.is_finite() || !(0.0 < self.output_gain && self.output_gain <= 1.0) {
+        if !(self.output_gain.is_finite() && 0.0 < self.output_gain && self.output_gain <= 1.0) {
             return Err(ModelError::InvalidOutputGain);
         }
         if self.mode_count == 0 || self.mode_count > MAX_MODES {
