@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/moonlight-physics",
+  "crates/moonlight-model",
+  "crates/moonlight-dsp",
+  "crates/moonlight-offline",
+  "crates/moonlight-wasm",
+  "crates/moonlight-ffi",
+  "crates/moonlight-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.82"
+authors = ["Moonlight Piano contributors"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
