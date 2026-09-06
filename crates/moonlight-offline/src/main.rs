@@ -9,11 +9,7 @@ fn main() -> ExitCode {
         let metrics = render_to_files(&config)?;
         println!(
             "rendered {} frames at {} Hz; peak={:.6}, rms={:.6}, pcm-fnv1a64={:016x}",
-            metrics.frames,
-            metrics.sample_rate_hz,
-            metrics.peak,
-            metrics.rms,
-            metrics.pcm_fnv1a64
+            metrics.frames, metrics.sample_rate_hz, metrics.peak, metrics.rms, metrics.pcm_fnv1a64
         );
         Ok(())
     }) {
@@ -38,9 +34,7 @@ fn parse_args(arguments: Vec<String>) -> Result<RenderConfig, moonlight_offline:
         let key = &arguments[index];
         index += 1;
         let value = arguments.get(index).ok_or_else(|| {
-            moonlight_offline::OfflineError::InvalidArgument(format!(
-                "missing value for {key}"
-            ))
+            moonlight_offline::OfflineError::InvalidArgument(format!("missing value for {key}"))
         })?;
         index += 1;
         match key.as_str() {
@@ -67,9 +61,7 @@ fn parse_args(arguments: Vec<String>) -> Result<RenderConfig, moonlight_offline:
             }
             "--seed" => {
                 seed = value.parse().map_err(|_| {
-                    moonlight_offline::OfflineError::InvalidArgument(
-                        "invalid --seed".to_owned(),
-                    )
+                    moonlight_offline::OfflineError::InvalidArgument("invalid --seed".to_owned())
                 })?
             }
             "--model" => model_path = Some(PathBuf::from(value)),
@@ -94,9 +86,7 @@ fn parse_args(arguments: Vec<String>) -> Result<RenderConfig, moonlight_offline:
             moonlight_offline::OfflineError::InvalidArgument("--events is required".to_owned())
         })?,
         output_dir: output_dir.ok_or_else(|| {
-            moonlight_offline::OfflineError::InvalidArgument(
-                "--output-dir is required".to_owned(),
-            )
+            moonlight_offline::OfflineError::InvalidArgument("--output-dir is required".to_owned())
         })?,
     })
 }

@@ -365,8 +365,7 @@ mod tests {
 
     #[test]
     fn parses_timestamped_events() {
-        let events =
-            parse_events("0,note_on,60,0.8\n48000,note_off,60,0.5\n", 96_000).unwrap();
+        let events = parse_events("0,note_on,60,0.8\n48000,note_off,60,0.5\n", 96_000).unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].frame, 48_000);
     }
@@ -374,8 +373,6 @@ mod tests {
     #[test]
     fn rejects_out_of_range_and_unordered_events() {
         assert!(parse_events("100,note_on,60,0.8\n", 100).is_err());
-        assert!(
-            parse_events("10,note_on,60,0.8\n5,note_off,60,0.5\n", 100).is_err()
-        );
+        assert!(parse_events("10,note_on,60,0.8\n5,note_off,60,0.5\n", 100).is_err());
     }
 }

@@ -121,15 +121,12 @@ impl ModelPack {
                 });
             }
             has_energy |= mode.amplitude > 0.0;
-            let coefficients = modal_coefficients(
-                mode.frequency_hz,
-                mode.t60_seconds,
-                sample_rate_hz as f64,
-            )
-            .map_err(|_| ModelError::InvalidMode {
-                index,
-                reason: "unstable or invalid pole",
-            })?;
+            let coefficients =
+                modal_coefficients(mode.frequency_hz, mode.t60_seconds, sample_rate_hz as f64)
+                    .map_err(|_| ModelError::InvalidMode {
+                        index,
+                        reason: "unstable or invalid pole",
+                    })?;
             if !(0.0..1.0).contains(&coefficients.pole_radius) {
                 return Err(ModelError::InvalidMode {
                     index,
@@ -168,7 +165,9 @@ pub fn parse_model_pack(input: &str, sample_rate_hz: u32) -> Result<ModelPack, M
 
     for (line_number, line) in lines {
         let Some((key, value)) = line.split_once('=') else {
-            return Err(ModelError::UnknownField(format!("line {line_number}: {line}")));
+            return Err(ModelError::UnknownField(format!(
+                "line {line_number}: {line}"
+            )));
         };
         let key = key.trim();
         let value = value.trim();

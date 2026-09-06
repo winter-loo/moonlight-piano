@@ -81,18 +81,18 @@ pub struct PianoEngine {
 
 impl PianoEngine {
     pub fn new(pack: &ModelPack, sample_rate_hz: u32, seed: u64) -> Result<Self, ProcessError> {
-        pack.validate(sample_rate_hz).map_err(ProcessError::InvalidModel)?;
+        pack.validate(sample_rate_hz)
+            .map_err(ProcessError::InvalidModel)?;
         let mut modes = [ModeState::default(); MAX_MODES];
         for (index, spec) in pack.modes[..pack.mode_count].iter().enumerate() {
-            let coefficients = modal_coefficients(
-                spec.frequency_hz,
-                spec.t60_seconds,
-                sample_rate_hz as f64,
-            )
-            .map_err(|_| ProcessError::InvalidModel(ModelError::InvalidMode {
-                index,
-                reason: "could not derive stable coefficients",
-            }))?;
+            let coefficients =
+                modal_coefficients(spec.frequency_hz, spec.t60_seconds, sample_rate_hz as f64)
+                    .map_err(|_| {
+                        ProcessError::InvalidModel(ModelError::InvalidMode {
+                            index,
+                            reason: "could not derive stable coefficients",
+                        })
+                    })?;
             modes[index] = ModeState {
                 feedback_1: coefficients.feedback_1,
                 feedback_2: coefficients.feedback_2,
@@ -121,13 +121,13 @@ impl PianoEngine {
         if output.is_empty() {
             return Err(ProcessError::EmptyOutput);
         }
-        let block_end_frame = block_start_frame
-            .checked_add(output.len() as u64)
-            .ok_or(ProcessError::EventOutsideBlock {
+        let block_end_frame = block_start_frame.checked_add(output.len() as u64).ok_or(
+            ProcessError::EventOutsideBlock {
                 frame: u64::MAX,
                 start: block_start_frame,
                 end: u64::MAX,
-            })?;
+            },
+        )?;
         let mut previous_frame = None;
         for event in events {
             if event.frame < block_start_frame || event.frame >= block_end_frame {
@@ -201,9 +201,7 @@ impl PianoEngine {
                 if note != self.note {
                     return Err(ProcessError::UnsupportedNote(note));
                 }
-                if !release_velocity.is_finite()
-                    || !(0.0..=1.0).contains(&release_velocity)
-                {
+                if !release_velocity.is_finite() || !(0.0..=1.0).contains(&release_velocity) {
                     return Err(ProcessError::InvalidVelocity);
                 }
             }
@@ -271,9 +269,7 @@ mode=523.334500,5.2,0.42
         let mut left_output = [0.0; 256];
         let mut right_output = [0.0; 256];
         left.process_block(0, &[event], &mut left_output).unwrap();
-        right
-            .process_block(0, &[event], &mut right_output)
-            .unwrap();
+        right.process_block(0, &[event], &mut right_output).unwrap();
         assert_eq!(left_output, right_output);
         assert!(left_output.iter().any(|sample| *sample != 0.0));
     }
