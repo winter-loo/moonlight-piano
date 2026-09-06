@@ -2,9 +2,15 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Pulse } from "@phosphor-icons/react";
+import { ArrowLeft, Pause, Play, Pulse, Stop } from "@phosphor-icons/react";
 
+import {
+  BROWSER_SOUND_ENGINES,
+  createBrowserSoundEngine,
+  type BrowserSoundEngineId,
+} from "@/lib/audio/engine-registry";
 import { scheduleMetronome, scheduleMidiTone } from "@/lib/audio/scheduler";
+import { NOW, type SoundEngine, type SoundEngineSnapshot } from "@/lib/audio/sound-engine";
 import { PracticeTransport, type TransportSnapshot } from "@/lib/engine/transport";
 import { mariageAmourContent } from "@/lib/music/content/mariage-amour";
 import { beatsToSeconds } from "@/lib/music/tempo";
@@ -22,13 +28,38 @@ const EMPTY_SNAPSHOT: TransportSnapshot = { state: "idle", beat: -1, audioTime: 
 
 export function EngineLab() {
   const transportRef = useRef<PracticeTransport | null>(null);
+  const engineRef = useRef<SoundEngine | null>(null);
+  const unsubscribeEngineRef = useRef<(() => void) | null>(null);
   const rafRef = useRef<number | null>(null);
+  const logSerialRef = useRef(0);
   const frameWindowRef = useRef({ startedAt: 0, lastAt: 0, frames: 0, largestGap: 0 });
+  const [selectedEngineId, setSelectedEngineId] = useState<BrowserSoundEngineId>("legacy-interactive-piano");
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
+  const [engineSnapshot, setEngineSnapshot] = useState<SoundEngineSnapshot | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [frameHealth, setFrameHealth] = useState({ fps: 0, largestGap: 0 });
+  const [pedals, setPedals] = useState({ sustain: 0, sostenuto: 0, unaCorda: 0 });
 
-  const runAnimation = useCallback((transport: PracticeTransport) => {
+  const disposeEngine = useCallback(async () => {
+    unsubscribeEngineRef.current?.();
+    unsubscribeEngineRef.current = null;
+    const engine = engineRef.current;
+    engineRef.current = null;
+    if (engine) await engine.dispose();
+    setEngineSnapshot(null);
+  }, []);
+
+  const activateEngine = useCallback(async (id: BrowserSoundEngineId, context: AudioContext) => {
+    await disposeEngine();
+    const engine = createBrowserSoundEngine(id, { context, ownsContext: false });
+    engineRef.current = engine;
+    unsubscribeEngineRef.current = engine.subscribe(setEngineSnapshot);
+    await engine.start();
+    setEngineSnapshot(engine.snapshot());
+    return engine;
+  }, [disposeEngine]);
+
+  const runAnimation = useCallback((transport: PracticeTransport, engine: SoundEngine) => {
     const tick = () => {
       const now = performance.now();
       const window = frameWindowRef.current;
@@ -48,39 +79,84 @@ export function EngineLab() {
       }
       const next = transport.snapshot();
       setSnapshot(next);
+      setEngineSnapshot(engine.snapshot());
       if (next.state === "completed") return;
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
   }, []);
 
-  const start = useCallback(async () => {
+  const stopLab = useCallback(async () => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    await disposeEngine();
     await transportRef.current?.stop();
+    transportRef.current = null;
+    setSnapshot(EMPTY_SNAPSHOT);
+  }, [disposeEngine]);
+
+  const start = useCallback(async () => {
+    await stopLab();
     const transport = new PracticeTransport({ bpm: 60, totalBeats: 8, countInBeats: 1 });
     transportRef.current = transport;
     const context = await transport.start();
+    const engine = await activateEngine(selectedEngineId, context);
     setLogs([]);
     setFrameHealth({ fps: 0, largestGap: 0 });
+    setPedals({ sustain: 0, sostenuto: 0, unaCorda: 0 });
     frameWindowRef.current = { startedAt: 0, lastAt: 0, frames: 0, largestGap: 0 };
     for (let beat = -1; beat < 8; beat += 1) {
-      scheduleMetronome(context, transport.startTime + beat * beatsToSeconds(1, 60), beat % 3 === 0);
+      scheduleMetronome(engine, transport.startTime + beat * beatsToSeconds(1, 60), beat % 3 === 0);
     }
-    runAnimation(transport);
-  }, [runAnimation]);
+    runAnimation(transport, engine);
+  }, [activateEngine, runAnimation, selectedEngineId, stopLab]);
 
-  const record = useCallback((source: string, eventTimeStamp = performance.now()) => {
+  const selectEngine = useCallback(async (id: BrowserSoundEngineId) => {
+    setSelectedEngineId(id);
     const transport = transportRef.current;
-    if (!transport?.context) return;
-    scheduleMidiTone(transport.context, 60, transport.context.currentTime, 0.08, 0.08);
+    const context = transport?.context;
+    if (!transport || !context || context.state === "closed") return;
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    const engine = await activateEngine(id, context);
+    runAnimation(transport, engine);
+  }, [activateEngine, runAnimation]);
+
+  const record = useCallback((source: string, eventTimeStamp = performance.now(), notes = [60]) => {
+    const transport = transportRef.current;
+    const engine = engineRef.current;
+    if (!transport || !engine) return;
+    const at = engine.clock().currentTimeSeconds;
+    for (const [index, note] of notes.entries()) {
+      scheduleMidiTone(engine, note, at, 0.32, 0.08, `lab-${source}-${logSerialRef.current + 1}-${index}`);
+    }
+    logSerialRef.current += 1;
     setLogs((current) => [{
-      id: current.length + 1,
+      id: logSerialRef.current,
       source,
       beat: transport.beat(),
       performanceTime: performance.now(),
-      audioTime: transport.context?.currentTime ?? 0,
+      audioTime: at,
       dispatchDelay: Math.max(0, performance.now() - eventTimeStamp),
     }, ...current].slice(0, 12));
+  }, []);
+
+  const setPedal = useCallback((type: "sustain" | "sostenuto" | "una-corda", position: number) => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.dispatch({ type, position, time: NOW });
+    setPedals((current) => ({
+      ...current,
+      [type === "una-corda" ? "unaCorda" : type]: position,
+    }));
+  }, []);
+
+  const togglePause = useCallback(async () => {
+    const transport = transportRef.current;
+    if (!transport) return;
+    if (transport.snapshot().state === "paused") await transport.resume();
+    else await transport.pause();
+    setSnapshot(transport.snapshot());
+    if (engineRef.current) setEngineSnapshot(engineRef.current.snapshot());
   }, []);
 
   useEffect(() => {
@@ -96,9 +172,10 @@ export function EngineLab() {
   }, [record]);
 
   useEffect(() => () => {
-    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
-    void transportRef.current?.stop();
-  }, []);
+    void stopLab();
+  }, [stopLab]);
+
+  const engineClock = engineSnapshot?.clock;
 
   return (
     <main className="engine-lab">
@@ -110,26 +187,85 @@ export function EngineLab() {
 
       <section className="lab-grid">
         <article className="lab-card lab-clock">
+          <h2>声音引擎</h2>
+          <label>
+            当前实现
+            <select
+              value={selectedEngineId}
+              onChange={(event: React.ChangeEvent<HTMLSelectElement>) => void selectEngine(event.target.value as BrowserSoundEngineId)}
+            >
+              {BROWSER_SOUND_ENGINES.map((engine) => (
+                <option value={engine.id} key={engine.id}>{engine.label}</option>
+              ))}
+            </select>
+          </label>
+          <p>{BROWSER_SOUND_ENGINES.find((engine) => engine.id === selectedEngineId)?.description}</p>
+          <dl>
+            <div><dt>状态</dt><dd>{engineSnapshot?.state ?? "未启动"}</dd></div>
+            <div><dt>就绪</dt><dd>{engineSnapshot?.ready ? "是" : "否"}</dd></div>
+            <div><dt>活动 voice</dt><dd>{engineSnapshot?.activeVoices ?? 0}</dd></div>
+            <div><dt>最后事件</dt><dd>{engineSnapshot?.lastEventType ?? "—"}</dd></div>
+            <div><dt>路由版本</dt><dd>{engineSnapshot?.routeVersion ?? 0}</dd></div>
+          </dl>
+          <div className="dialog-actions">
+            <button type="button" onClick={() => void start()}><Play size={18} weight="fill" />启动</button>
+            <button type="button" onClick={() => void togglePause()}><Pause size={18} weight="fill" />暂停/继续</button>
+            <button type="button" onClick={() => void stopLab()}><Stop size={18} weight="fill" />停止</button>
+          </div>
+          <button type="button" className="lab-link" onClick={() => void engineRef.current?.handleRouteChange()}>模拟输出路由变化</button>
+        </article>
+
+        <article className="lab-card lab-clock">
           <h2>统一时钟</h2>
           <dl>
-            <div><dt>状态</dt><dd>{snapshot.state}</dd></div>
+            <div><dt>Transport</dt><dd>{snapshot.state}</dd></div>
             <div><dt>当前拍</dt><dd>{snapshot.beat.toFixed(3)}</dd></div>
-            <div><dt>AudioContext</dt><dd>{snapshot.audioTime.toFixed(3)} s</dd></div>
-            <div><dt>performance</dt><dd>{snapshot.performanceTime.toFixed(1)} ms</dd></div>
+            <div><dt>AudioContext</dt><dd>{(engineClock?.currentTimeSeconds ?? 0).toFixed(3)} s</dd></div>
+            <div><dt>sample frame</dt><dd>{engineClock?.currentSampleFrame ?? 0}</dd></div>
+            <div><dt>采样率</dt><dd>{engineClock?.sampleRate ?? 0} Hz</dd></div>
+            <div><dt>base latency</dt><dd>{engineClock?.baseLatencySeconds?.toFixed(4) ?? "—"} s</dd></div>
+            <div><dt>output latency</dt><dd>{engineClock?.outputLatencySeconds?.toFixed(4) ?? "—"} s</dd></div>
             <div><dt>画面帧率</dt><dd>{frameHealth.fps || "—"} FPS</dd></div>
             <div><dt>最大帧间隔</dt><dd>{frameHealth.largestGap || "—"} ms</dd></div>
           </dl>
-          <button type="button" className="moon-primary" onClick={() => void start()}>启动 60 BPM 测试</button>
         </article>
 
         <article className="lab-card lab-input">
           <h2>输入事件</h2>
-          <button type="button" className="lab-tap" onPointerDown={(event) => record("pointer", event.timeStamp)}>点击或按空格</button>
+          <button type="button" className="lab-tap" onPointerDown={(event: React.PointerEvent<HTMLButtonElement>) => record("pointer-c4", event.timeStamp)}>C4 · 点击或空格</button>
+          <div className="dialog-actions">
+            <button type="button" onClick={(event: React.MouseEvent<HTMLButtonElement>) => record("c-major", event.timeStamp, [60, 64, 67])}>C 大三和弦</button>
+            <button type="button" onClick={(event: React.MouseEvent<HTMLButtonElement>) => record("wide-chord", event.timeStamp, [48, 60, 67, 72])}>宽音域和弦</button>
+          </div>
           <ol>
             {logs.length === 0 ? <li className="empty">启动时钟后记录事件</li> : logs.map((entry) => (
               <li key={entry.id}><b>{entry.source}</b><span>beat {entry.beat.toFixed(3)}</span><small>分发 {entry.dispatchDelay.toFixed(1)} ms</small></li>
             ))}
           </ol>
+        </article>
+
+        <article className="lab-card lab-input">
+          <h2>踏板事件</h2>
+          <label>
+            Sustain {Math.round(pedals.sustain * 100)}%
+            <input type="range" min="0" max="1" step="0.01" value={pedals.sustain} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setPedal("sustain", Number(event.target.value))} />
+          </label>
+          <label>
+            Sostenuto {Math.round(pedals.sostenuto * 100)}%
+            <input type="range" min="0" max="1" step="0.01" value={pedals.sostenuto} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setPedal("sostenuto", Number(event.target.value))} />
+          </label>
+          <label>
+            Una corda {Math.round(pedals.unaCorda * 100)}%
+            <input type="range" min="0" max="1" step="0.01" value={pedals.unaCorda} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setPedal("una-corda", Number(event.target.value))} />
+          </label>
+          <div className="dialog-actions">
+            <button type="button" onClick={() => setPedal("sustain", pedals.sustain >= 0.5 ? 0 : 1)}>切换延音</button>
+            <button type="button" onClick={() => {
+              setPedal("sustain", 0);
+              setPedal("sostenuto", 0);
+              setPedal("una-corda", 0);
+            }}>释放全部</button>
+          </div>
         </article>
 
         <article className="lab-card lab-content">

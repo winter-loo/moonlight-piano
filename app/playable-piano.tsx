@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { createBrowserSoundEngine } from "@/lib/audio/engine-registry";
+import { NOW, type SoundEngine } from "@/lib/audio/sound-engine";
+
 type Hand = "左手" | "右手";
 
 type PlayablePianoProps = {
@@ -12,11 +15,6 @@ type PlayablePianoProps = {
 type NoteDefinition = {
   name: string;
   octave: number;
-};
-
-type Voice = {
-  gain: GainNode;
-  oscillators: OscillatorNode[];
 };
 
 const NATURAL_NAMES = ["C", "D", "E", "F", "G", "A", "B"] as const;
@@ -119,10 +117,6 @@ function midiNumber(note: NoteDefinition) {
   return (note.octave + 1) * 12 + SEMITONES[note.name];
 }
 
-function frequencyFor(note: NoteDefinition) {
-  return 440 * Math.pow(2, (midiNumber(note) - 69) / 12);
-}
-
 function shortcutLabel(code?: string) {
   if (!code) return "";
   if (KEY_LABELS[code]) return KEY_LABELS[code];
@@ -133,9 +127,8 @@ function shortcutLabel(code?: string) {
 
 export function PlayablePiano({ hand, onActivity }: PlayablePianoProps) {
   const [activeNotes, setActiveNotes] = useState<Set<string>>(() => new Set());
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const compressorRef = useRef<DynamicsCompressorNode | null>(null);
-  const voicesRef = useRef<Map<string, Voice>>(new Map());
+  const engineRef = useRef<SoundEngine | null>(null);
+  const voicesRef = useRef<Map<string, { noteId: string; midi: number }>>(new Map());
   const heldCodesRef = useRef<Set<string>>(new Set());
   const heldOctavesRef = useRef<Set<string>>(new Set());
   const pointerSourcesRef = useRef<Map<number, string>>(new Map());
@@ -149,24 +142,11 @@ export function PlayablePiano({ hand, onActivity }: PlayablePianoProps) {
     return result;
   }, [noteMap]);
 
-  const ensureAudioContext = useCallback(() => {
-    if (!audioContextRef.current) {
-      const AudioContextConstructor = window.AudioContext;
-      const context = new AudioContextConstructor({ latencyHint: "interactive" });
-      const compressor = context.createDynamicsCompressor();
-      compressor.threshold.value = -20;
-      compressor.knee.value = 18;
-      compressor.ratio.value = 6;
-      compressor.attack.value = 0.003;
-      compressor.release.value = 0.2;
-      compressor.connect(context.destination);
-      audioContextRef.current = context;
-      compressorRef.current = compressor;
+  const getEngine = useCallback(() => {
+    if (!engineRef.current) {
+      engineRef.current = createBrowserSoundEngine("legacy-interactive-piano");
     }
-    if (audioContextRef.current.state === "suspended") {
-      void audioContextRef.current.resume();
-    }
-    return audioContextRef.current;
+    return engineRef.current;
   }, []);
 
   const startNote = useCallback((note: NoteDefinition, source: string) => {
@@ -174,73 +154,44 @@ export function PlayablePiano({ hand, onActivity }: PlayablePianoProps) {
     if (note.octave === 0 && !["A", "A#", "B"].includes(note.name)) return;
     if (note.octave === 8 && note.name !== "C") return;
 
-    const context = ensureAudioContext();
-    const compressor = compressorRef.current;
-    if (!compressor) return;
-
-    const gain = context.createGain();
-    const filter = context.createBiquadFilter();
-    const now = context.currentTime;
-    const frequency = frequencyFor(note);
-
-    filter.type = "lowpass";
-    filter.frequency.setValueAtTime(Math.min(5200, 1600 + frequency * 5), now);
-    filter.Q.value = 0.7;
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.34, now + 0.008);
-    gain.gain.exponentialRampToValueAtTime(0.16, now + 0.42);
-    gain.connect(filter);
-    filter.connect(compressor);
-
-    const harmonics = [
-      { ratio: 1, type: "triangle" as OscillatorType, level: 0.72 },
-      { ratio: 2, type: "sine" as OscillatorType, level: 0.19 },
-      { ratio: 3, type: "sine" as OscillatorType, level: 0.09 },
-    ];
-    const oscillators = harmonics.map(({ ratio, type, level }) => {
-      const oscillator = context.createOscillator();
-      const partialGain = context.createGain();
-      oscillator.type = type;
-      oscillator.frequency.setValueAtTime(frequency * ratio, now);
-      partialGain.gain.value = level;
-      oscillator.connect(partialGain);
-      partialGain.connect(gain);
-      oscillator.start(now);
-      return oscillator;
+    const engine = getEngine();
+    void engine.start();
+    engine.dispatch({
+      type: "note-on",
+      sourceId: source,
+      note: midiNumber(note),
+      velocity: 0.8,
+      gain: 1,
+      time: NOW,
     });
-
-    voicesRef.current.set(source, { gain, oscillators });
-    setActiveNotes((current) => new Set(current).add(noteId(note)));
+    const id = noteId(note);
+    voicesRef.current.set(source, { noteId: id, midi: midiNumber(note) });
+    setActiveNotes((current) => new Set(current).add(id));
     onActivity?.(`${hand}：${note.name}${note.octave}`);
-  }, [ensureAudioContext, hand, onActivity]);
+  }, [getEngine, hand, onActivity]);
 
   const stopSource = useCallback((source: string) => {
     const voice = voicesRef.current.get(source);
     if (!voice) return;
-    const context = audioContextRef.current;
-    if (context) {
-      const now = context.currentTime;
-      voice.gain.gain.cancelScheduledValues(now);
-      voice.gain.gain.setValueAtTime(Math.max(voice.gain.gain.value, 0.0001), now);
-      voice.gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
-      voice.oscillators.forEach((oscillator) => oscillator.stop(now + 0.3));
-    }
-    voicesRef.current.delete(source);
-    const soundingNotes = new Set<string>();
-    voicesRef.current.forEach((_value, voiceSource) => {
-      const encoded = voiceSource.split(":").at(-1);
-      if (encoded) soundingNotes.add(encoded);
+    getEngine().dispatch({
+      type: "note-off",
+      sourceId: source,
+      note: voice.midi,
+      releaseVelocity: 0.5,
+      time: NOW,
     });
-    setActiveNotes(soundingNotes);
-  }, []);
+    voicesRef.current.delete(source);
+    setActiveNotes(new Set([...voicesRef.current.values()].map((value) => value.noteId)));
+  }, [getEngine]);
 
   const stopAll = useCallback(() => {
-    [...voicesRef.current.keys()].forEach(stopSource);
+    engineRef.current?.stopAll(NOW);
+    voicesRef.current.clear();
     heldCodesRef.current.clear();
     heldOctavesRef.current.clear();
     pointerSourcesRef.current.clear();
     setActiveNotes(new Set());
-  }, [stopSource]);
+  }, []);
 
   useEffect(() => {
     function isTypingTarget(target: EventTarget | null) {
@@ -284,8 +235,8 @@ export function PlayablePiano({ hand, onActivity }: PlayablePianoProps) {
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", stopAll);
       stopAll();
-      void audioContextRef.current?.close();
-      audioContextRef.current = null;
+      void engineRef.current?.dispose();
+      engineRef.current = null;
     };
   }, [noteMap, octaveMap, startNote, stopAll, stopSource]);
 
@@ -324,10 +275,10 @@ export function PlayablePiano({ hand, onActivity }: PlayablePianoProps) {
               aria-label={`${note.name}${note.octave}${shortcut ? `，快捷键 ${shortcutLabel(shortcut)}` : ""}`}
               data-note={id}
               data-active={activeNotes.has(id) ? "true" : "false"}
-              onPointerDown={(event) => pointerDown(event, note)}
+              onPointerDown={(event: React.PointerEvent<HTMLButtonElement>) => pointerDown(event, note)}
               onPointerUp={pointerUp}
               onPointerCancel={pointerUp}
-              onContextMenu={(event) => event.preventDefault()}
+              onContextMenu={(event: React.MouseEvent<HTMLButtonElement>) => event.preventDefault()}
             >
               {shortcut ? <span>{shortcutLabel(shortcut)}</span> : null}
             </button>
@@ -345,10 +296,10 @@ export function PlayablePiano({ hand, onActivity }: PlayablePianoProps) {
               aria-label={`${note.name}${note.octave}${shortcut ? `，快捷键 ${shortcutLabel(shortcut)}` : ""}`}
               data-note={id}
               data-active={activeNotes.has(id) ? "true" : "false"}
-              onPointerDown={(event) => pointerDown(event, note)}
+              onPointerDown={(event: React.PointerEvent<HTMLButtonElement>) => pointerDown(event, note)}
               onPointerUp={pointerUp}
               onPointerCancel={pointerUp}
-              onContextMenu={(event) => event.preventDefault()}
+              onContextMenu={(event: React.MouseEvent<HTMLButtonElement>) => event.preventDefault()}
             >
               {shortcut ? <span>{shortcutLabel(shortcut)}</span> : null}
             </button>
