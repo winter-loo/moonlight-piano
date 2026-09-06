@@ -144,6 +144,11 @@ pub fn render_to_files(config: &RenderConfig) -> Result<RenderMetrics, OfflineEr
     let model_text = fs::read_to_string(&config.model_path)?;
     let pack = parse_model_pack(&model_text, config.sample_rate_hz)?;
     let total_frames = (config.duration_seconds * config.sample_rate_hz as f64).round() as usize;
+    if total_frames == 0 {
+        return Err(OfflineError::InvalidArgument(
+            "duration must render at least one sample frame".to_owned(),
+        ));
+    }
     let event_text = fs::read_to_string(&config.events_path)?;
     let events = parse_events(&event_text, total_frames as u64)?;
     let mut engine = PianoEngine::new(&pack, config.sample_rate_hz, config.seed)?;
@@ -171,12 +176,7 @@ pub fn render_to_files(config: &RenderConfig) -> Result<RenderMetrics, OfflineEr
     let wav_path = config.output_dir.join("c4-reference.wav");
     let quantized = write_pcm16_wav(&wav_path, config.sample_rate_hz, &samples)?;
     let metrics = calculate_metrics(config.sample_rate_hz, &samples, &quantized);
-    write_report(
-        &config.output_dir.join("c4-report.json"),
-        config,
-        &pack.instrument_id,
-        &metrics,
-    )?;
+    write_report(&config.output_dir.join("c4-report.json"), config, &pack.instrument_id, &metrics)?;
     write_energy_csv(
         &config.output_dir.join("c4-energy.csv"),
         config.sample_rate_hz,
@@ -184,7 +184,7 @@ pub fn render_to_files(config: &RenderConfig) -> Result<RenderMetrics, OfflineEr
     )?;
     write_timing_report(
         &config.output_dir.join("c4-timing.json"),
-        config,
+        &metrics,
         elapsed.as_secs_f64(),
     )?;
     Ok(metrics)
@@ -212,11 +212,7 @@ fn validate_config(config: &RenderConfig) -> Result<(), OfflineError> {
     Ok(())
 }
 
-fn write_pcm16_wav(
-    path: &Path,
-    sample_rate_hz: u32,
-    samples: &[f32],
-) -> Result<Vec<i16>, OfflineError> {
+fn write_pcm16_wav(path: &Path, sample_rate_hz: u32, samples: &[f32]) -> Result<Vec<i16>, OfflineError> {
     let quantized: Vec<i16> = samples
         .iter()
         .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
@@ -283,7 +279,8 @@ fn write_report(
             "  \"instrumentId\": \"{}\",\n",
             "  \"sampleRateHz\": {},\n",
             "  \"blockSize\": {},\n",
-            "  \"durationSeconds\": {:.9},\n",
+            "  \"requestedDurationSeconds\": {:.9},\n",
+            "  \"renderedDurationSeconds\": {:.9},\n",
             "  \"seed\": {},\n",
             "  \"frames\": {},\n",
             "  \"peak\": {:.12},\n",
@@ -295,6 +292,7 @@ fn write_report(
         metrics.sample_rate_hz,
         config.block_size,
         config.duration_seconds,
+        rendered_audio_seconds(metrics.frames, metrics.sample_rate_hz),
         config.seed,
         metrics.frames,
         metrics.peak,
@@ -334,12 +332,17 @@ fn write_energy_csv(path: &Path, sample_rate_hz: u32, samples: &[f32]) -> Result
     Ok(())
 }
 
+fn rendered_audio_seconds(frames: usize, sample_rate_hz: u32) -> f64 {
+    frames as f64 / sample_rate_hz as f64
+}
+
 fn write_timing_report(
     path: &Path,
-    config: &RenderConfig,
+    metrics: &RenderMetrics,
     render_seconds: f64,
 ) -> Result<(), OfflineError> {
-    let realtime_ratio = render_seconds / config.duration_seconds;
+    let audio_seconds = rendered_audio_seconds(metrics.frames, metrics.sample_rate_hz);
+    let realtime_ratio = render_seconds / audio_seconds;
     let json = format!(
         concat!(
             "{{\n",
@@ -349,7 +352,7 @@ fn write_timing_report(
             "  \"realtimeRatio\": {:.9}\n",
             "}}\n"
         ),
-        render_seconds, config.duration_seconds, realtime_ratio
+        render_seconds, audio_seconds, realtime_ratio
     );
     fs::write(path, json)?;
     Ok(())
@@ -365,14 +368,25 @@ mod tests {
 
     #[test]
     fn parses_timestamped_events() {
-        let events = parse_events("0,note_on,60,0.8\n48000,note_off,60,0.5\n", 96_000).unwrap();
+        let events = parse_events("0,note_on,60,0.8\n48000,note_off,60,0.5\n", 96_000)
+            .unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].frame, 48_000);
     }
 
     #[test]
+    fn rendered_audio_duration_comes_from_frames() {
+        assert_eq!(rendered_audio_seconds(1, 8_000), 0.000125);
+        assert_eq!(rendered_audio_seconds(288_000, 48_000), 6.0);
+    }
+
+    #[test]
     fn rejects_out_of_range_and_unordered_events() {
         assert!(parse_events("100,note_on,60,0.8\n", 100).is_err());
-        assert!(parse_events("10,note_on,60,0.8\n5,note_off,60,0.5\n", 100).is_err());
+        assert!(parse_events(
+            "10,note_on,60,0.8\n5,note_off,60,0.5\n",
+            100
+        )
+        .is_err());
     }
 }

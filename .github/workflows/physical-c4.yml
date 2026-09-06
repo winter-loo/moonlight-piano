@@ -3,6 +3,7 @@ name: physical-c4
 on:
   push:
     branches:
+      - main
       - feat/physical-c4-offline
     paths:
       - "Cargo.toml"

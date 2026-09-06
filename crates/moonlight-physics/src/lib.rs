@@ -30,7 +30,11 @@ pub fn rigid_string_frequency(
         return Err(PhysicsError::InvalidFrequency);
     }
     let n = partial_index as f64;
-    Ok(n * fundamental_hz * (1.0 + inharmonicity * n * n).sqrt())
+    let frequency_hz = n * fundamental_hz * (1.0 + inharmonicity * n * n).sqrt();
+    if !frequency_hz.is_finite() {
+        return Err(PhysicsError::NonFinite);
+    }
+    Ok(frequency_hz)
 }
 
 /// Convert a modal frequency and amplitude T60 into a stable two-pole resonator.
@@ -75,6 +79,14 @@ mod tests {
     fn rigid_string_partials_are_inharmonic() {
         let second = rigid_string_frequency(261.625_565, 2, 0.00008).unwrap();
         assert!(second > 2.0 * 261.625_565);
+    }
+
+    #[test]
+    fn overflowed_rigid_string_frequency_is_rejected() {
+        assert_eq!(
+            rigid_string_frequency(f64::MAX, 2, 0.0),
+            Err(PhysicsError::NonFinite)
+        );
     }
 
     #[test]
