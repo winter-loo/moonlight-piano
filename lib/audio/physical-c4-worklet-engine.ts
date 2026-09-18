@@ -55,6 +55,8 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
     } catch (error) {
       this.stateValue = "error";
       this.lastError = errorMessage(error);
+      this.emit();
+      throw error;
     }
     this.emit();
   }
@@ -221,30 +223,50 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
     // without changing the physical state or offline-reference numerics.
     master.gain.value = 1.0;
     node.connect(master).connect(context.destination);
-    node.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
-      const message = event.data;
-      if (message.type === "ready") {
-        this.ready = true;
-        this.telemetry.memoryBytes = message.memoryBytes;
-        this.stateValue = context.state === "running" ? "running" : "suspended";
-        this.lastError = null;
-      } else if (message.type === "telemetry") {
-        this.telemetry = message;
-      } else if (message.type === "error") {
+    const initialized = new Promise<void>((resolve, reject) => {
+      let settled = false;
+
+      const failInitialization = (message: string) => {
         this.ready = false;
         this.stateValue = "error";
-        this.lastError = message.message;
-      }
-      this.emit();
-    };
-    node.onprocessorerror = () => {
-      this.ready = false;
-      this.stateValue = "error";
-      this.lastError = "AudioWorklet processor failed.";
-      this.emit();
-    };
+        this.lastError = message;
+        this.emit();
+        if (!settled) {
+          settled = true;
+          reject(new Error(message));
+        }
+      };
+
+      node.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
+        const message = event.data;
+        if (message.type === "ready") {
+          this.ready = true;
+          this.telemetry.memoryBytes = message.memoryBytes;
+          this.stateValue = context.state === "running" ? "running" : "suspended";
+          this.lastError = null;
+          this.emit();
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+          return;
+        }
+        if (message.type === "telemetry") {
+          this.telemetry = message;
+          this.emit();
+          return;
+        }
+        failInitialization(message.message);
+      };
+
+      node.onprocessorerror = () => {
+        failInitialization("AudioWorklet processor failed.");
+      };
+    });
+
     this.node = node;
     this.master = master;
+    await initialized;
   }
 
   private assertUsable() {
