@@ -1,25 +1,33 @@
 import { LegacyWebAudioEngine, type LegacyWebAudioProfile } from "./legacy-web-audio-engine.ts";
+import { PhysicalC4WorkletEngine } from "./physical-c4-worklet-engine.ts";
 import type { SoundEngine } from "./sound-engine.ts";
 
 export const BROWSER_SOUND_ENGINES = [
   {
+    id: "physical-c4",
+    label: "Rust 物理 C4",
+    description: "与离线 renderer 共用 Rust 物理状态；WASM 在 AudioWorklet 内按 block 渲染。",
+    kind: "physical" as const,
+    profile: "physical-c4",
+    labLevel: 1.0,
+  },
+  {
     id: "legacy-lesson-tone",
     label: "当前课程音色",
-    description: "保留课程示范使用的三角波与二次泛音声音。",
-    profile: "lesson-tone",
+    description: "课程示范的三角波与二次泛音基线，用于响度匹配 A/B。",
+    kind: "legacy" as const,
+    profile: "lesson-tone" as LegacyWebAudioProfile,
+    labLevel: 0.24,
   },
   {
     id: "legacy-interactive-piano",
     label: "当前交互钢琴",
-    description: "保留首页可演奏键盘的三泛音、滤波与压缩声音。",
-    profile: "interactive-piano",
+    description: "首页三泛音、滤波与压缩基线，用于响度匹配 A/B。",
+    kind: "legacy" as const,
+    profile: "interactive-piano" as LegacyWebAudioProfile,
+    labLevel: 0.24,
   },
-] as const satisfies readonly {
-  id: string;
-  label: string;
-  description: string;
-  profile: LegacyWebAudioProfile;
-}[];
+] as const;
 
 export type BrowserSoundEngineId = (typeof BROWSER_SOUND_ENGINES)[number]["id"];
 
@@ -41,6 +49,9 @@ export function createBrowserSoundEngine(
   options: BrowserSoundEngineOptions = {},
 ): SoundEngine {
   const descriptor = getBrowserSoundEngineDescriptor(id);
+  if (descriptor.kind === "physical") {
+    return new PhysicalC4WorkletEngine(options);
+  }
   return new LegacyWebAudioEngine({
     id: descriptor.id,
     label: descriptor.label,
@@ -50,11 +61,6 @@ export function createBrowserSoundEngine(
   });
 }
 
-/**
- * Compatibility seam for existing score schedulers that already own an
- * AudioContext. Sound generation still goes through the same SoundEngine
- * contract; the adapter never closes the caller-owned context.
- */
 export function getLegacyLessonEngineForContext(context: AudioContext) {
   const existing = lessonEngineByContext.get(context);
   if (existing) return existing;

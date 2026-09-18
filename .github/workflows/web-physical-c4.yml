@@ -1,0 +1,43 @@
+name: web-physical-c4
+
+on:
+  pull_request:
+    paths:
+      - "crates/moonlight-wasm/**"
+      - "lib/audio/**"
+      - "public/audio/**"
+      - "app/lab/engine/**"
+      - "tests/unit/**"
+      - "scripts/build-web-audio-wasm.mjs"
+      - ".github/workflows/web-physical-c4.yml"
+  push:
+    branches:
+      - feat/web-physical-c4-audioworklet
+    paths:
+      - "crates/moonlight-wasm/**"
+      - "lib/audio/**"
+      - "public/audio/**"
+      - "app/lab/engine/**"
+      - "tests/unit/**"
+      - "scripts/build-web-audio-wasm.mjs"
+      - ".github/workflows/web-physical-c4.yml"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: cargo fmt --all --check
+      - run: cargo test -p moonlight-wasm
+      - run: npm run audio:wasm
+      - run: node --experimental-strip-types --test tests/unit/sound-engine.test.mjs tests/unit/physical-c4-worklet.test.mjs
+      - run: npx tsc -p tsconfig.audio-worklet.json --noEmit
