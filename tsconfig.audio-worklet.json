@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "incremental": false
+  },
+  "include": [
+    "next-env.d.ts",
+    "app/lab/engine/EngineLab.tsx",
+    "app/playable-piano.tsx",
+    "lib/audio/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "db/**",
+    "worker/**"
+  ]
+}

@@ -34,7 +34,7 @@ export function EngineLab() {
   const logSerialRef = useRef(0);
   const releaseTimersRef = useRef<number[]>([]);
   const frameWindowRef = useRef({ startedAt: 0, lastAt: 0, frames: 0, largestGap: 0 });
-  const [selectedEngineId, setSelectedEngineId] = useState<BrowserSoundEngineId>("legacy-interactive-piano");
+  const [selectedEngineId, setSelectedEngineId] = useState<BrowserSoundEngineId>("physical-c4");
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [engineSnapshot, setEngineSnapshot] = useState<SoundEngineSnapshot | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -136,7 +136,7 @@ export function EngineLab() {
       sourceId: sources[index],
       note,
       velocity: 0.8,
-      gain: 0.24,
+      gain: BROWSER_SOUND_ENGINES.find((candidate) => candidate.id === selectedEngineId)?.labLevel ?? 0.24,
       time: NOW,
     })));
     releaseTimersRef.current.push(window.setTimeout(() => {
@@ -158,7 +158,7 @@ export function EngineLab() {
       audioTime: at,
       dispatchDelay: Math.max(0, performance.now() - eventTimeStamp),
     }, ...current].slice(0, 12));
-  }, []);
+  }, [selectedEngineId]);
 
   const setPedal = useCallback((type: "sustain" | "sostenuto" | "una-corda", position: number) => {
     const engine = engineRef.current;
@@ -227,6 +227,11 @@ export function EngineLab() {
             <div><dt>最后事件</dt><dd>{engineSnapshot?.lastEventType ?? "—"}</dd></div>
             <div><dt>最后错误</dt><dd>{engineSnapshot?.lastError ?? "—"}</dd></div>
             <div><dt>路由版本</dt><dd>{engineSnapshot?.routeVersion ?? 0}</dd></div>
+            <div><dt>render block</dt><dd>{engineSnapshot?.parameters.blockSize ?? "—"} frames</dd></div>
+            <div><dt>deadline ratio</dt><dd>{typeof engineSnapshot?.parameters.renderDeadlineRatio === "number" ? engineSnapshot.parameters.renderDeadlineRatio.toFixed(3) : "—"}</dd></div>
+            <div><dt>WASM memory</dt><dd>{typeof engineSnapshot?.parameters.wasmMemoryBytes === "number" ? Math.round(engineSnapshot.parameters.wasmMemoryBytes / 1024) : "—"} KiB</dd></div>
+            <div><dt>underruns</dt><dd>{engineSnapshot?.parameters.underruns ?? "—"}</dd></div>
+            <div><dt>late events</dt><dd>{engineSnapshot?.parameters.lateEvents ?? "—"}</dd></div>
           </dl>
           <div className="dialog-actions">
             <button type="button" onClick={() => void start()}><Play size={18} weight="fill" />启动</button>
@@ -255,8 +260,8 @@ export function EngineLab() {
           <h2>输入事件</h2>
           <button type="button" className="lab-tap" onPointerDown={(event: React.PointerEvent<HTMLButtonElement>) => record("pointer-c4", event.timeStamp)}>C4 · 点击或空格</button>
           <div className="dialog-actions">
-            <button type="button" onClick={(event: React.MouseEvent<HTMLButtonElement>) => record("c-major", event.timeStamp, [60, 64, 67])}>C 大三和弦</button>
-            <button type="button" onClick={(event: React.MouseEvent<HTMLButtonElement>) => record("wide-chord", event.timeStamp, [48, 60, 67, 72])}>宽音域和弦</button>
+            <button type="button" disabled={selectedEngineId === "physical-c4"} onClick={(event: React.MouseEvent<HTMLButtonElement>) => record("c-major", event.timeStamp, [60, 64, 67])}>C 大三和弦</button>
+            <button type="button" disabled={selectedEngineId === "physical-c4"} onClick={(event: React.MouseEvent<HTMLButtonElement>) => record("wide-chord", event.timeStamp, [48, 60, 67, 72])}>宽音域和弦</button>
           </div>
           <ol>
             {logs.length === 0 ? <li className="empty">启动时钟后记录事件</li> : logs.map((entry) => (
