@@ -1,0 +1,4 @@
+# Tested environment. Analysis-only dependencies; never imported by realtime DSP.
+numpy==2.3.5
+scipy==1.17.0
+soundfile==0.13.1

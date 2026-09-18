@@ -33,13 +33,13 @@ the registered C4 probe needed to prove the evidence pipeline.
 
 ```bash
 npm run acoustic:validate
-npm run acoustic:ingest:salamander
+npm run acoustic:ingest:all
 npm run acoustic:report
 ```
 
 Downloads go under ignored `work/acoustic-data/raw/`. Before a byte is accepted,
-the tool checks the expected size and Git blob SHA-1. The local receipt also
-records SHA-256. A changed byte count, checksum, license, attribution, or use
+the tool checks the expected size, Git blob SHA-1 and registered SHA-256.
+The local receipt records those verified values. A changed byte count, checksum, license, attribution, or use
 policy fails the command.
 
 The provenance report is written as Markdown and JSON under
@@ -87,3 +87,34 @@ only SHA-256 commitments for the private manifest, frozen candidate artifact,
 and metric plan plus release identifiers—never sample names, URLs, labels, or
 per-sample results. Rebuilding the candidate changes its commitment and requires
 a new sealed evaluation.
+
+The metric plan is validated before it can be sealed. It must be JSON with
+`schemaVersion: 1`, the exact `candidateId`, at least one metric containing an
+`id`, `comparison` (`lte` or `gte`), and finite `threshold`, plus non-empty
+`statisticalMethod` and `failureCriteria`. Empty or arbitrary bytes cannot
+produce a valid-looking holdout commitment.
+
+CI uses `ingest-all` and requires a valid receipt for every non-blocked source,
+so adding a registry entry also adds its URL, byte length, both checksums, and
+license evidence to the end-to-end integrity gate.
+
+## Read-only validation workflow
+
+CI no longer reconstructs source files from a compressed payload or commits and
+pushes corrections. The fixes are normal, reviewable source. The workflow uses
+`contents: read`, does not persist checkout credentials, and verifies the tracked
+worktree remains unchanged. Full application tests, lint and build remain in
+place alongside acoustic tests. Raw data and final holdout data are not uploaded.
+
+`ingest-all` takes one validated registry snapshot and processes all non-blocked
+sources. It never promotes a research-only source to commercial calibration;
+source status and permissions remain attached to every receipt. Explicitly
+requesting a blocked source fails. The npm report command uses `--require-all true`
+to reject missing receipts for any non-blocked source, not only the first C4.
+
+Downloads have a 60-second timeout, a 256 MiB per-asset budget, registered byte
+limits and no redirects. Nested symlinks and non-basename asset names are rejected.
+An existing cached asset or receipt must match exactly; ingestion never silently
+overwrites tampered evidence. Caller-controlled output storage must still be
+protected by normal filesystem permissions. These checks are not a substitute
+for external-custodian access control or legal review.

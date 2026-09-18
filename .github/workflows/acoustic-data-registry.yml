@@ -8,50 +8,43 @@ on:
     paths:
       - "data/acoustic/**"
       - "scripts/acoustic-data-registry.mjs"
-      - "tests/unit/acoustic-data-registry.test.mjs"
+      - "tests/unit/acoustic*.test.mjs"
       - "docs/audio/acoustic-data-registry.md"
       - "package.json"
-      - ".github/scripts/acoustic-round2.*"
-      - ".github/scripts/apply-acoustic-round2.py"
+      - "package-lock.json"
       - ".github/workflows/acoustic-data-registry.yml"
   pull_request:
     paths:
       - "data/acoustic/**"
       - "scripts/acoustic-data-registry.mjs"
-      - "tests/unit/acoustic-data-registry.test.mjs"
+      - "tests/unit/acoustic*.test.mjs"
       - "docs/audio/acoustic-data-registry.md"
       - "package.json"
-      - ".github/scripts/acoustic-round2.*"
-      - ".github/scripts/apply-acoustic-round2.py"
+      - "package-lock.json"
       - ".github/workflows/acoustic-data-registry.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   validate-and-ingest:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
-      - name: Apply remaining reviewed fail-closed corrections once
-        if: github.event_name == 'push' && github.actor != 'github-actions[bot]'
-        run: |
-          python3 .github/scripts/apply-acoustic-round2.py
-          rm .github/scripts/apply-acoustic-round2.py .github/scripts/acoustic-round2.part*
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "fix(audio-data): close remaining provenance fail-open paths"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
       - name: Focused registry tests
-        run: node --experimental-strip-types --test tests/unit/acoustic-data-registry.test.mjs
+        run: node --experimental-strip-types --test tests/unit/acoustic*.test.mjs
       - name: Full unit suite
         run: npm test
       - name: Lint application and registry code
@@ -60,7 +53,7 @@ jobs:
         run: npm run build
       - name: Validate fail-closed registry
         run: npm run acoustic:validate
-      - name: Reproducibly ingest every applicable registered source
+      - name: Reproducibly ingest every non-blocked registered source
         run: npm run acoustic:ingest:all
       - name: Produce attachable provenance report
         run: npm run acoustic:report
@@ -68,9 +61,13 @@ jobs:
         run: |
           test -z "$(git ls-files -- work/acoustic-data/raw)"
           test -z "$(git status --short --untracked-files=all work/acoustic-data/raw)"
-          while IFS= read -r asset; do
-            git check-ignore "$asset"
-          done < <(find work/acoustic-data/raw -type f -print)
+          find work/acoustic-data/raw -type f -print0 | while IFS= read -r -d '' file; do
+            git check-ignore "$file"
+          done
+      - name: Validation must not rewrite tracked source
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
       - name: Upload receipts and provenance only
         uses: actions/upload-artifact@v4
         with:

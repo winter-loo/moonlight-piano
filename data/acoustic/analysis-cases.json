@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "cases": [{
+    "id": "salamander-c4-reference",
+    "assetReference": "salamander-tonejs-c4:c4-mp3",
+    "conditions": {
+      "note": 60,
+      "velocity": null,
+      "pedal": null,
+      "microphone": null,
+      "instrument": "Yamaha C5 grand piano",
+      "noteOffSeconds": null
+    },
+    "limitations": [
+      "MP3 is a distribution derivative, not a lossless master recording.",
+      "The filename identifies C4; this distribution does not establish the exact velocity, pedal trajectory, release time or synchronized microphone position.",
+      "This case is inspectable development evidence, never sealed final holdout.",
+      "Additional real bass, treble, controlled pedal and multi-position cases require registered, licensed, checksummed sources. Synthetic fixtures are not a substitute for those data."
+    ]
+  }]
+}

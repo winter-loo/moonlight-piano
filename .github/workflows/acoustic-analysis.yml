@@ -1,0 +1,65 @@
+name: acoustic-analysis
+on:
+  push:
+    branches: [main, feat/objective-acoustic-reports]
+    paths: ['tools/acoustics/**', 'tests/acoustics/**', 'data/acoustic/**', 'scripts/*acoustic*.mjs', 'tests/unit/acoustic*.test.mjs', 'package.json', 'package-lock.json', '.github/workflows/acoustic-analysis.yml']
+  pull_request:
+    paths: ['tools/acoustics/**', 'tests/acoustics/**', 'data/acoustic/**', 'scripts/*acoustic*.mjs', 'tests/unit/acoustic*.test.mjs', 'package.json', 'package-lock.json', '.github/workflows/acoustic-analysis.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned analysis wheels
+        run: |
+          python3 -m pip install --only-binary=:all: -r tools/acoustics/requirements.txt
+      - run: node --check scripts/prepare-acoustic-analysis.mjs
+      - run: python3 -m compileall -q tools/acoustics
+      - run: python3 -m unittest discover -s tests/acoustics -v
+      - run: node --experimental-strip-types --test tests/unit/acoustic*.test.mjs
+      - name: Known estimator fixtures, explicitly not piano recordings
+        run: |
+          python3 -m tools.acoustics.fixtures
+          python3 -m tools.acoustics.cli --manifest work/acoustic-analysis/fixtures/job.json --output work/acoustic-analysis/synthetic --rendered-rate 48000
+          python3 -m tools.acoustics.cli --manifest work/acoustic-analysis/fixtures/job.json --output work/acoustic-analysis/synthetic-native-96k --rendered-rate 96000
+      - name: Registered source and license bytes must pass before decoding
+        run: |
+          node scripts/prepare-acoustic-analysis.mjs --case salamander-c4-reference --output work/acoustic-analysis/reference-job.json
+          python3 -m tools.acoustics.cli --manifest work/acoustic-analysis/reference-job.json --output work/acoustic-analysis/reference-c4
+          test -z "$(git ls-files -- work/acoustic-data/raw work/acoustic-analysis/fixtures)"
+      - name: Record checkout identity without rewriting source
+        run: |
+          git rev-parse HEAD > work/acoustic-analysis/source-revision.txt
+          git diff --exit-code
+          git diff --cached --exit-code
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acoustic-analysis-${{ github.sha }}
+          path: |
+            work/acoustic-analysis/source-revision.txt
+            work/acoustic-analysis/synthetic.json
+            work/acoustic-analysis/synthetic.md
+            work/acoustic-analysis/synthetic-native-96k.json
+            work/acoustic-analysis/synthetic-native-96k.md
+            work/acoustic-analysis/reference-c4.json
+            work/acoustic-analysis/reference-c4.md
+          if-no-files-found: error
