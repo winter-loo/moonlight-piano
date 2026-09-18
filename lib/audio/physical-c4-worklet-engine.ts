@@ -54,7 +54,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       this.stateValue = context.state === "running" ? "running" : "suspended";
       this.lastError = null;
     } catch (error) {
-      if (this.stateValue !== "disposed") {
+      if (!this.isDisposed()) {
         this.stateValue = "error";
         this.lastError = errorMessage(error);
         this.emit();
@@ -256,7 +256,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       };
 
       const isCurrentInitialization = () => (
-        this.stateValue !== "disposed"
+        !this.isDisposed()
         && this.node === node
         && this.contextValue === context
       );
@@ -307,8 +307,12 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
     await initialized;
   }
 
+  private isDisposed() {
+    return this.stateValue === "disposed";
+  }
+
   private assertUsable() {
-    if (this.stateValue === "disposed" || this.stateValue === "closed") throw new Error("Sound engine is disposed.");
+    if (this.isDisposed() || this.stateValue === "closed") throw new Error("Sound engine is disposed.");
   }
 
   private emit() {
