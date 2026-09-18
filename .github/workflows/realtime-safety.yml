@@ -1,0 +1,53 @@
+name: realtime-safety
+on:
+  push:
+    branches: [main, feat/realtime-safety-budget]
+    paths: ['crates/**', 'Cargo*', 'rust-toolchain.toml', 'scripts/check-realtime-*', 'scripts/render-physical-c4.sh', 'fixtures/physical-c4/**', 'tests/realtime/**', '.github/workflows/realtime-safety.yml']
+  pull_request:
+    paths: ['crates/**', 'Cargo*', 'rust-toolchain.toml', 'scripts/check-realtime-*', 'scripts/render-physical-c4.sh', 'fixtures/physical-c4/**', 'tests/realtime/**', '.github/workflows/realtime-safety.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  conformance-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: python3 -m unittest discover -s tests/realtime -v
+      - run: cargo test --workspace
+      - run: cargo test --release -p moonlight-dsp --test realtime_contract
+      - run: cargo build -p moonlight-wasm --target wasm32-unknown-unknown
+      - run: sh scripts/check-realtime-boundary.sh
+      - name: Deterministic render
+        run: |
+          bash scripts/render-physical-c4.sh work/c4-a
+          bash scripts/render-physical-c4.sh work/c4-b
+          cmp work/c4-a/c4-reference.wav work/c4-b/c4-reference.wav
+          cmp work/c4-a/c4-report.json work/c4-b/c4-report.json
+          cmp work/c4-a/c4-energy.csv work/c4-b/c4-energy.csv
+      - name: Hosted smoke, not hardware certification
+        run: |
+          export MOONLIGHT_SOURCE_REVISION="$(git rev-parse HEAD)"
+          cargo run --release -p moonlight-bench -- --mode smoke --blocks 2048 --device-id github-hosted --output work/realtime/current.json
+          python3 scripts/check-realtime-report.py work/realtime/current.json
+      - name: Validation must not rewrite tracked source
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+      - uses: actions/upload-artifact@v4
+        with:
+          name: realtime-evidence-${{ github.sha }}
+          path: |
+            work/realtime/current.json
+            work/realtime/undefined-symbols.txt
+            work/realtime/defined-symbols.txt
+          if-no-files-found: error
