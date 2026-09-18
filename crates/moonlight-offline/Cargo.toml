@@ -1,0 +1,17 @@
+[package]
+name = "moonlight-offline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+moonlight-dsp = { path = "../moonlight-dsp" }
+moonlight-model = { path = "../moonlight-model" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "moonlight-render"
+path = "src/main.rs"
