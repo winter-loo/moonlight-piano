@@ -1,0 +1,34 @@
+name: sound-engine-boundary
+
+on:
+  pull_request:
+    paths:
+      - "app/lab/engine/**"
+      - "app/playable-piano.tsx"
+      - "lib/audio/**"
+      - "tests/unit/sound-engine.test.mjs"
+      - "tsconfig.sound-engine.json"
+      - ".github/workflows/sound-engine-boundary.yml"
+  push:
+    branches:
+      - feat/audio-engine-boundary
+    paths:
+      - "app/lab/engine/**"
+      - "app/playable-piano.tsx"
+      - "lib/audio/**"
+      - "tests/unit/sound-engine.test.mjs"
+      - "tsconfig.sound-engine.json"
+      - ".github/workflows/sound-engine-boundary.yml"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node --experimental-strip-types --test tests/unit/sound-engine.test.mjs
+      - run: npx tsc -p tsconfig.sound-engine.json --noEmit
