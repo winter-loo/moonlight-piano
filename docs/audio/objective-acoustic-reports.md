@@ -106,8 +106,33 @@ contrasts, byte tampering, final-holdout rejection, deterministic fixture
 regeneration, and JSON/Markdown output. These are estimator tests, not a
 statistical demonstration of accuracy on every real piano.
 
-Missing work before full ticket acceptance: current-head CI, the real C4
-end-to-end download/decode/report gate, and sufficiently documented real examples
+## Recorded local verification
+
+On 2026-09-18 the owner tested the unchanged commit
+`e4a2759239d5b0661dff25d515686c482ef0992c` on macOS with Python 3.13.7,
+NumPy 2.3.5, SciPy 1.17.0, SoundFile 0.13.1 and Node 25.8.1. All 14 acoustic
+and 13 then-current registry tests passed. The real registered C4 was downloaded,
+checksummed together with its license evidence, decoded and analyzed into JSON
+and Markdown. Evidence ZIP SHA-256:
+`6e1a69ac1ad993fd6114bbc3a5a1f63c29384c10a0534a37002391174cdf4804`.
+
+That closes the previously unexecuted local C4 end-to-end gate, not the entire
+ticket. The measured file still has unknown velocity, pedal, release and
+microphone metadata. Both T60 estimates remained unavailable at the chosen
+fit-quality threshold; the report does not invent decay constants to fill gaps.
+Original report JSON SHA-256:
+`b9ff56a83e6670fa2b325c82bb74a22b0717146d86e35228f69ce161bb12b018`.
+
+The cleanup makes registry validation read-only with respect to tracked source,
+commits the all-source ingestion/strict receipt checks as ordinary code, removes
+the compressed CI rewrite payload, and adds workflow/IO regression tests. The
+application unit suite, lint and production build remain required gates. The
+workflow records the actual checked-out revision, not a different PR head.
+Historical measurements above do not certify a new cleanup commit without
+rerunning its changed paths. GitHub-hosted jobs were blocked by account billing
+limits before any step ran; this is distinct from executed test failures.
+
+Remaining before full ticket acceptance: sufficiently documented real examples
 for the bass/treble/velocity/pedal/microphone matrix. Integrated perceptual
 loudness, confidence calibration on real recordings and source-specific
 estimator error characterization remain explicit limitations, not fabricated

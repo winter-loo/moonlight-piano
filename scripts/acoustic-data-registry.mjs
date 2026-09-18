@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -59,9 +59,9 @@ export function validateRegistryDocument(registry, policy, splits, holdout) {
   const assetsByReference = new Map();
   for (const source of registry?.sources ?? []) {
     const prefix = `source ${source?.id ?? "<missing>"}`;
-    if (!nonEmpty(source?.id)) errors.push(`${prefix}: id is required`);
-    else if (sourceIds.has(source.id)) errors.push(`${prefix}: duplicate source id`);
-    else sourceIds.add(source.id);
+    if (!isSafeAssetFileName(source?.id)) errors.push(`${prefix}: a safe source id is required`);
+    else if (sourceIds.has(source.id.toLowerCase())) errors.push(`${prefix}: duplicate source id`);
+    else sourceIds.add(source.id.toLowerCase());
     if (!nonEmpty(source?.title)) errors.push(`${prefix}: title is required`);
     if (!SOURCE_STATUSES.has(source?.status)) errors.push(`${prefix}: invalid status`);
     if (!isoDate(source?.retrievedAt)) errors.push(`${prefix}: retrievedAt must be YYYY-MM-DD`);
@@ -84,7 +84,7 @@ export function validateRegistryDocument(registry, policy, splits, holdout) {
       if (rule.modelParameterFitting === "research-only" && source.permittedUse.modelParameterFitting) {
         errors.push(`${prefix}: license policy isolates this source from product model fitting`);
       }
-      if (rule.shareAlike && source.status === "product-eligible" && !nonEmpty(source?.license?.clearanceId)) {
+      if ((rule.shareAlike || rule.modelParameterFitting === "legal-clearance-required") && source.status === "product-eligible" && !nonEmpty(source?.license?.clearanceId)) {
         errors.push(`${prefix}: share-alike source requires explicit legal clearance before product use`);
       }
       if (source.status === "product-eligible" && (!source.permittedUse.commercial || !source.permittedUse.modelParameterFitting)) {
@@ -102,6 +102,7 @@ export function validateRegistryDocument(registry, policy, splits, holdout) {
       continue;
     }
     const assetIds = new Set();
+    const fileNames = new Set();
     for (const asset of source.assets) {
       const assetPrefix = `${prefix} asset ${asset?.id ?? "<missing>"}`;
       if (!nonEmpty(asset?.id)) errors.push(`${assetPrefix}: id is required`);
@@ -109,6 +110,12 @@ export function validateRegistryDocument(registry, policy, splits, holdout) {
       else assetIds.add(asset.id);
       if (!ASSET_ROLES.has(asset?.role)) errors.push(`${assetPrefix}: invalid role`);
       if (!nonEmpty(asset?.kind) || !nonEmpty(asset?.fileName)) errors.push(`${assetPrefix}: kind and fileName are required`);
+      else if (!isSafeAssetFileName(asset.fileName)) errors.push(`${assetPrefix}: fileName must be a safe basename`);
+      if (typeof asset?.fileName === "string") {
+        const fileKey = asset.fileName.toLowerCase();
+        if (fileNames.has(fileKey)) errors.push(`${assetPrefix}: duplicate fileName`);
+        fileNames.add(fileKey);
+      }
       const pinnedUrlError = validatePinnedAssetUrl(
         asset?.url,
         source?.origin?.distributionRepository,
@@ -186,7 +193,15 @@ function validateSplits(splits, assetsByReference, errors) {
     for (const reference of references) {
       const entry = assetsByReference.get(reference);
       if (!entry) errors.push(`development split references unknown asset ${reference}`);
-      else if (entry.asset.role !== expectedAssetRole) errors.push(`${reference} is assigned to ${roleName} but declares ${entry.asset.role}`);
+      else {
+        if (entry.asset.role !== expectedAssetRole) errors.push(`${reference} is assigned to ${roleName} but declares ${entry.asset.role}`);
+        if (roleName === "calibration"
+          && (entry.source.status !== "product-eligible"
+            || entry.source.permittedUse?.commercial !== true
+            || entry.source.permittedUse?.modelParameterFitting !== true)) {
+          errors.push(`${reference} cannot enter calibration without product-eligible commercial fitting permission`);
+        }
+      }
       if (assigned.has(reference)) errors.push(`${reference} is assigned to more than one inspectable split`);
       assigned.set(reference, roleName);
     }
@@ -201,8 +216,17 @@ function validateHoldoutProtocol(holdout, errors) {
   if (holdout?.status !== "protocol-ready" || holdout?.storage !== "external-custodian") errors.push("holdout must be protocol-ready and externally custodied");
   if (holdout?.repositoryContainsData !== false || holdout?.repositoryContainsLocators !== false) errors.push("holdout data and locators must remain outside the repository");
   if (holdout?.candidateFreezeRequired !== true) errors.push("holdout requires a frozen candidate");
+  const permittedActors = holdout?.access?.permittedActors;
+  const deniedActors = holdout?.access?.deniedActors;
+  if (!Array.isArray(permittedActors) || permittedActors.length !== 1 || permittedActors[0] !== "release-gate-custodian") {
+    errors.push("holdout permitted actors must contain only release-gate-custodian");
+  }
+  if (!Array.isArray(deniedActors)) errors.push("holdout deniedActors must be an array");
   for (const actor of ["developers", "tuning-agents", "automation-agents"]) {
-    if (!holdout?.access?.deniedActors?.includes(actor)) errors.push(`holdout must deny ${actor}`);
+    if (!Array.isArray(deniedActors) || !deniedActors.includes(actor)) errors.push(`holdout must deny ${actor}`);
+  }
+  for (const actor of Array.isArray(permittedActors) ? permittedActors : []) {
+    if (Array.isArray(deniedActors) && deniedActors.includes(actor)) errors.push(`holdout actor ${actor} cannot be both permitted and denied`);
   }
   if (holdout?.access?.reveal !== "one-shot-after-candidate-freeze") errors.push("holdout reveal must be one-shot after candidate freeze");
   if (holdout?.access?.preDecisionOutput !== "aggregate-pass-fail-only") errors.push("holdout may reveal only aggregate pass/fail before the release decision");
@@ -223,22 +247,60 @@ export async function loadAndValidateRegistry(options = {}) {
   return validateRegistryDocument(registry, policy, splits, holdout);
 }
 
-export async function ingestSource({ sourceId, outputRoot, fetchImpl = fetch }) {
-  const validated = await loadAndValidateRegistry();
+export async function ingestSource({ sourceId, outputRoot, fetchImpl = fetch, registryOptions = {} }) {
+  const validated = await loadAndValidateRegistry(registryOptions);
   const source = validated.registry.sources.find((candidate) => candidate.id === sourceId);
   if (!source) throw new RegistryError(`unknown source: ${sourceId}`, "SOURCE_NOT_FOUND");
-  const rawDirectory = path.join(outputRoot, "raw", source.id);
-  const receiptDirectory = path.join(outputRoot, "receipts");
-  await mkdir(rawDirectory, { recursive: true });
-  await mkdir(receiptDirectory, { recursive: true });
+  if (source.status === "blocked") throw new RegistryError(`blocked source cannot be ingested: ${sourceId}`, "SOURCE_BLOCKED");
+  return ingestValidatedSource({ source, outputRoot, fetchImpl });
+}
+
+export async function ingestAllSources({ outputRoot, fetchImpl = fetch, registryOptions = {} }) {
+  const validated = await loadAndValidateRegistry(registryOptions);
+  const sources = validated.registry.sources.filter((source) => source.status !== "blocked");
+  const results = [];
+  for (const source of sources) {
+    results.push(await ingestValidatedSource({ source, outputRoot, fetchImpl }));
+  }
+  return results;
+}
+
+async function ingestValidatedSource({ source, outputRoot, fetchImpl }) {
+  // Canonicalize the caller-owned output root; reject nested symlinks.
+  await mkdir(outputRoot, { recursive: true });
+  const outputDirectory = await realpath(outputRoot);
+  const rawDirectory = path.join(outputDirectory, "raw", source.id);
+  const receiptDirectory = path.join(outputDirectory, "receipts");
+  for (const directory of [rawDirectory, receiptDirectory]) {
+    await mkdir(directory, { recursive: true });
+    if (await realpath(directory) !== directory) {
+      throw new RegistryError("ingestion directories must not traverse symlinks", "UNSAFE_ASSET_PATH");
+    }
+  }
   const receipts = [];
   for (const asset of source.assets) {
-    const response = await fetchImpl(asset.url, { redirect: "follow" });
+    if (asset.expectedBytes > 256 * 1024 * 1024) {
+      throw new RegistryError("asset exceeds the 256 MiB ingestion budget", "ASSET_TOO_LARGE");
+    }
+    const response = await fetchImpl(asset.url, {
+      redirect: "error", signal: AbortSignal.timeout(60_000),
+    });
     if (!response.ok) throw new RegistryError(`${source.id}:${asset.id} download failed with HTTP ${response.status}`, "DOWNLOAD_FAILED");
-    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!response.body) throw new RegistryError("download has no body", "DOWNLOAD_FAILED");
+    const chunks = [];
+    let byteCount = 0;
+    for await (const chunk of response.body) {
+      byteCount += chunk.length;
+      if (byteCount > asset.expectedBytes) throw new RegistryError("download exceeds registered byte count", "INTEGRITY_MISMATCH");
+      chunks.push(chunk);
+    }
+    const buffer = Buffer.concat(chunks, byteCount);
     verifyAssetBuffer(source.id, asset, buffer);
-    const localPath = path.join(rawDirectory, asset.fileName);
-    await writeFile(localPath, buffer);
+    const localPath = path.resolve(rawDirectory, asset.fileName);
+    if (path.dirname(localPath) !== rawDirectory) {
+      throw new RegistryError(`${source.id}:${asset.id} destination escapes the raw directory`, "UNSAFE_ASSET_PATH");
+    }
+    await writeOrVerifyFile(localPath, buffer);
     receipts.push({
       assetId: asset.id,
       role: asset.role,
@@ -260,7 +322,7 @@ export async function ingestSource({ sourceId, outputRoot, fetchImpl = fetch }) 
     assets: receipts,
   };
   const receiptPath = path.join(receiptDirectory, `${source.id}.json`);
-  await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+  await writeOrVerifyFile(receiptPath, Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`));
   return { receipt, receiptPath };
 }
 
@@ -275,7 +337,7 @@ export function verifyAssetBuffer(sourceId, asset, buffer) {
 export async function sealHoldoutManifest({ manifestPath, candidateId, candidateArtifactPath, metricPlanPath, outputPath, custodian }) {
   const absoluteManifest = path.resolve(manifestPath);
   const relativeToRoot = path.relative(ROOT, absoluteManifest);
-  if (!relativeToRoot.startsWith("..") && !path.isAbsolute(relativeToRoot)) {
+  if (relativeToRoot !== ".." && !relativeToRoot.startsWith(`..${path.sep}`) && !path.isAbsolute(relativeToRoot)) {
     throw new RegistryError("private holdout manifest must live outside the repository", "HOLDOUT_EXPOSURE_RISK");
   }
   if (!nonEmpty(candidateId) || !nonEmpty(custodian)) throw new RegistryError("candidateId and custodian are required", "HOLDOUT_INVALID");
@@ -284,6 +346,9 @@ export async function sealHoldoutManifest({ manifestPath, candidateId, candidate
     readFile(path.resolve(candidateArtifactPath)),
     readFile(path.resolve(metricPlanPath)),
   ]);
+  if (manifest.length === 0) throw new RegistryError("holdout manifest must not be empty", "HOLDOUT_INVALID");
+  if (candidateArtifact.length === 0) throw new RegistryError("candidate artifact must not be empty", "HOLDOUT_INVALID");
+  validateMetricPlan(metricPlan, candidateId);
   const receipt = {
     schemaVersion: 1,
     protocolId: "professional-piano-outer-test-v1",
@@ -296,12 +361,13 @@ export async function sealHoldoutManifest({ manifestPath, candidateId, candidate
     disclosure: "commitments only; no asset identifiers, locators, labels, or per-sample results",
   };
   await mkdir(path.dirname(path.resolve(outputPath)), { recursive: true });
-  await writeFile(path.resolve(outputPath), `${JSON.stringify(receipt, null, 2)}\n`);
+  await writeFile(path.resolve(outputPath), `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx" });
   return receipt;
 }
 
-export async function buildProvenanceReport({ receiptsDirectory }) {
-  const validated = await loadAndValidateRegistry();
+export async function buildProvenanceReport({ receiptsDirectory, requireAllReceipts = false, registryOptions = {} }) {
+  if (typeof requireAllReceipts !== "boolean") throw new RegistryError("requireAllReceipts must be boolean", "CLI_INVALID");
+  const validated = await loadAndValidateRegistry(registryOptions);
   const sources = [];
   for (const source of validated.registry.sources) {
     let receipt = null;
@@ -311,6 +377,9 @@ export async function buildProvenanceReport({ receiptsDirectory }) {
       if (error?.code !== "ENOENT") throw error;
     }
     if (receipt) validateReceipt(source, receipt);
+    else if (requireAllReceipts && source.status !== "blocked") {
+      throw new RegistryError(`${source.id}: required ingestion receipt is missing`, "RECEIPT_MISSING");
+    }
     sources.push({
       id: source.id,
       title: source.title,
@@ -339,6 +408,7 @@ export async function buildProvenanceReport({ receiptsDirectory }) {
     sources,
   };
 }
+
 
 function validateReceipt(source, receipt) {
   if (receipt?.schemaVersion !== 1) throw new RegistryError(`${source.id}: ingestion receipt schema is unsupported`, "RECEIPT_INVALID");
@@ -410,6 +480,61 @@ export function provenanceReportMarkdown(report) {
   return `${lines.join("\n")}\n`;
 }
 
+function validateMetricPlan(buffer, candidateId) {
+  let plan;
+  try {
+    plan = JSON.parse(buffer.toString("utf8"));
+  } catch {
+    throw new RegistryError("metric plan must be valid JSON", "HOLDOUT_INVALID");
+  }
+  if (!plainObject(plan) || plan.schemaVersion !== 1) {
+    throw new RegistryError("metric plan schemaVersion must be 1", "HOLDOUT_INVALID");
+  }
+  if (plan.candidateId !== candidateId) {
+    throw new RegistryError("metric plan candidateId must match the sealed candidate", "HOLDOUT_INVALID");
+  }
+  if (!Array.isArray(plan.metrics) || plan.metrics.length === 0) {
+    throw new RegistryError("metric plan must define at least one metric", "HOLDOUT_INVALID");
+  }
+  for (const [index, metric] of plan.metrics.entries()) {
+    if (!plainObject(metric)
+      || !nonEmpty(metric.id)
+      || !["lte", "gte"].includes(metric.comparison)
+      || typeof metric.threshold !== "number"
+      || !Number.isFinite(metric.threshold)) {
+      throw new RegistryError(`metric plan metric ${index} needs id, comparison, and finite threshold`, "HOLDOUT_INVALID");
+    }
+  }
+  if (!nonEmpty(plan.statisticalMethod)) {
+    throw new RegistryError("metric plan must freeze a statisticalMethod", "HOLDOUT_INVALID");
+  }
+  if (!nonEmpty(plan.failureCriteria)) {
+    throw new RegistryError("metric plan must freeze failureCriteria", "HOLDOUT_INVALID");
+  }
+}
+
+function isSafeAssetFileName(value) {
+  return typeof value === "string"
+    && /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(value)
+    && path.basename(value) === value
+    && path.win32.basename(value) === value;
+}
+
+async function writeOrVerifyFile(filePath, bytes) {
+  try {
+    await writeFile(filePath, bytes, { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    const info = await lstat(filePath);
+    if (!info.isFile() || info.isSymbolicLink() || info.size !== bytes.length) {
+      throw new RegistryError("existing ingestion file is unsafe or changed", "INTEGRITY_MISMATCH");
+    }
+    if (!(await readFile(filePath)).equals(bytes)) {
+      throw new RegistryError("existing ingestion bytes changed", "INTEGRITY_MISMATCH");
+    }
+  }
+}
+
 function nonEmpty(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -449,12 +574,28 @@ async function readJson(filePath) {
 
 function parseCli(argumentsList) {
   const [command, ...rest] = argumentsList;
+  const allowed = new Map([
+    ["validate", []],
+    ["ingest", ["source", "output"]],
+    ["ingest-all", ["output"]],
+    ["report", ["output", "receipts", "require-all"]],
+    ["seal-holdout", ["manifest", "candidate", "candidate-artifact", "metric-plan", "output", "custodian"]],
+  ]);
+  if (!allowed.has(command)) throw new RegistryError("unknown registry command", "CLI_INVALID");
   const options = {};
   for (let index = 0; index < rest.length; index += 2) {
     const key = rest[index];
     const value = rest[index + 1];
-    if (!key?.startsWith("--") || value === undefined) throw new RegistryError(`invalid CLI argument near ${key ?? "<end>"}`, "CLI_INVALID");
-    options[key.slice(2)] = value;
+    if (!key?.startsWith("--") || !value || value.startsWith("--")) {
+      throw new RegistryError("invalid CLI option/value pair", "CLI_INVALID");
+    }
+    const name = key.slice(2);
+    if (!allowed.get(command).includes(name)) throw new RegistryError(`unknown option ${key}`, "CLI_INVALID");
+    if (Object.hasOwn(options, name)) throw new RegistryError(`duplicate option ${key}`, "CLI_INVALID");
+    if (name === "require-all" && !["true", "false"].includes(value)) {
+      throw new RegistryError("--require-all must be true or false", "CLI_INVALID");
+    }
+    options[name] = value;
   }
   return { command, options };
 }
@@ -473,10 +614,19 @@ async function cli() {
     console.log(`ingested ${options.source}; receipt=${receiptPath}`);
     return;
   }
+  if (command === "ingest-all") {
+    const outputRoot = path.resolve(options.output ?? path.join(ROOT, "work/acoustic-data"));
+    const results = await ingestAllSources({ outputRoot });
+    console.log(`ingested ${results.length} registered source(s)`);
+    return;
+  }
   if (command === "report") {
     const outputBase = path.resolve(options.output ?? path.join(ROOT, "work/acoustic-data/provenance-report"));
     const receiptsDirectory = path.resolve(options.receipts ?? path.join(ROOT, "work/acoustic-data/receipts"));
-    const report = await buildProvenanceReport({ receiptsDirectory });
+    const report = await buildProvenanceReport({
+      receiptsDirectory,
+      requireAllReceipts: options["require-all"] === "true",
+    });
     await mkdir(path.dirname(outputBase), { recursive: true });
     await writeFile(`${outputBase}.json`, `${JSON.stringify(report, null, 2)}\n`);
     await writeFile(`${outputBase}.md`, provenanceReportMarkdown(report));
@@ -496,7 +646,7 @@ async function cli() {
     console.log(`sealed holdout commitment ${receipt.manifestSha256}`);
     return;
   }
-  throw new RegistryError("usage: acoustic-data-registry.mjs <validate|ingest|report|seal-holdout> [options]", "CLI_INVALID");
+  throw new RegistryError("usage: acoustic-data-registry.mjs <validate|ingest|ingest-all|report|seal-holdout> [options]", "CLI_INVALID");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
