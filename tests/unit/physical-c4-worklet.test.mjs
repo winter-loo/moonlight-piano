@@ -137,3 +137,92 @@ test("physical engine start waits for the AudioWorklet ready message and rejects
   assert.equal(failedEngine.snapshot().state, "error");
   assert.equal(failedEngine.snapshot().lastError, "wasm init failed");
 });
+
+
+test("disposing during startup rejects the pending start and ignores a late ready message", async (t) => {
+  const { PhysicalC4WorkletEngine } = await import("../../lib/audio/physical-c4-worklet-engine.ts");
+
+  const originalNode = globalThis.AudioWorkletNode;
+  const originalFetch = globalThis.fetch;
+
+  class FakeAudioWorkletNode {
+    static instances = [];
+
+    constructor() {
+      this.port = {
+        onmessage: null,
+        postMessage() {},
+      };
+      this.onprocessorerror = null;
+      FakeAudioWorkletNode.instances.push(this);
+    }
+
+    connect() {
+      return this;
+    }
+
+    disconnect() {}
+  }
+
+  const context = {
+    state: "running",
+    sampleRate: 48_000,
+    currentTime: 1,
+    baseLatency: 0.01,
+    outputLatency: 0.02,
+    destination: {},
+    audioWorklet: {
+      async addModule() {},
+    },
+    createGain() {
+      return {
+        gain: { value: 0 },
+        connect() {
+          return this;
+        },
+        disconnect() {},
+      };
+    },
+    async resume() {},
+    async suspend() {},
+    async close() {
+      this.state = "closed";
+    },
+  };
+
+  globalThis.AudioWorkletNode = FakeAudioWorkletNode;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async arrayBuffer() {
+      return new ArrayBuffer(8);
+    },
+  });
+
+  t.after(() => {
+    if (originalNode === undefined) delete globalThis.AudioWorkletNode;
+    else globalThis.AudioWorkletNode = originalNode;
+    globalThis.fetch = originalFetch;
+  });
+
+  const engine = new PhysicalC4WorkletEngine({ context, ownsContext: false });
+  const started = engine.start();
+
+  while (FakeAudioWorkletNode.instances.length === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const node = FakeAudioWorkletNode.instances[0];
+
+  await engine.dispose();
+  await assert.rejects(started, /disposed during startup/);
+  assert.equal(engine.snapshot().state, "disposed");
+  assert.equal(engine.snapshot().ready, false);
+
+  node.port.onmessage({
+    data: { type: "ready", memoryBytes: 65_536 },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(engine.snapshot().state, "disposed");
+  assert.equal(engine.snapshot().ready, false);
+});
