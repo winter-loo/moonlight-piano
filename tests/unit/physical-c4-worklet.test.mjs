@@ -23,3 +23,117 @@ test("worklet exposes deadline, memory, block-size and underrun telemetry", asyn
     assert.equal(source.includes(field), true, field);
   }
 });
+
+
+test("physical engine start waits for the AudioWorklet ready message and rejects initialization errors", async (t) => {
+  const { PhysicalC4WorkletEngine } = await import("../../lib/audio/physical-c4-worklet-engine.ts");
+
+  const originalNode = globalThis.AudioWorkletNode;
+  const originalFetch = globalThis.fetch;
+
+  class FakeAudioWorkletNode {
+    static instances = [];
+
+    constructor() {
+      this.port = {
+        onmessage: null,
+        postMessage() {},
+      };
+      this.onprocessorerror = null;
+      FakeAudioWorkletNode.instances.push(this);
+    }
+
+    connect() {
+      return this;
+    }
+
+    disconnect() {}
+  }
+
+  function makeContext() {
+    return {
+      state: "running",
+      sampleRate: 48_000,
+      currentTime: 1,
+      baseLatency: 0.01,
+      outputLatency: 0.02,
+      destination: {},
+      audioWorklet: {
+        async addModule() {},
+      },
+      createGain() {
+        return {
+          gain: { value: 0 },
+          connect() {
+            return this;
+          },
+          disconnect() {},
+        };
+      },
+      async resume() {
+        this.state = "running";
+      },
+      async suspend() {
+        this.state = "suspended";
+      },
+      async close() {
+        this.state = "closed";
+      },
+    };
+  }
+
+  globalThis.AudioWorkletNode = FakeAudioWorkletNode;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async arrayBuffer() {
+      return new ArrayBuffer(8);
+    },
+  });
+
+  t.after(() => {
+    if (originalNode === undefined) delete globalThis.AudioWorkletNode;
+    else globalThis.AudioWorkletNode = originalNode;
+    globalThis.fetch = originalFetch;
+  });
+
+  const context = makeContext();
+  const engine = new PhysicalC4WorkletEngine({ context, ownsContext: false });
+  let resolved = false;
+  const started = engine.start().then(() => {
+    resolved = true;
+  });
+
+  while (FakeAudioWorkletNode.instances.length === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resolved, false);
+  assert.equal(engine.snapshot().ready, false);
+
+  FakeAudioWorkletNode.instances[0].port.onmessage({
+    data: { type: "ready", memoryBytes: 65_536 },
+  });
+  await started;
+  assert.equal(resolved, true);
+  assert.equal(engine.snapshot().ready, true);
+  assert.equal(engine.snapshot().parameters.wasmMemoryBytes, 65_536);
+
+  const failedEngine = new PhysicalC4WorkletEngine({
+    context: makeContext(),
+    ownsContext: false,
+  });
+  const failedStart = failedEngine.start();
+
+  while (FakeAudioWorkletNode.instances.length < 2) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  FakeAudioWorkletNode.instances[1].port.onmessage({
+    data: { type: "error", message: "wasm init failed" },
+  });
+
+  await assert.rejects(failedStart, /wasm init failed/);
+  assert.equal(failedEngine.snapshot().ready, false);
+  assert.equal(failedEngine.snapshot().state, "error");
+  assert.equal(failedEngine.snapshot().lastError, "wasm init failed");
+});
