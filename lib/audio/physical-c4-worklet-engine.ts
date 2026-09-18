@@ -34,6 +34,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
   private lastError: string | null = null;
   private routeVersion = 0;
   private ready = false;
+  private rejectPendingInitialization: ((error: Error) => void) | null = null;
   private activeVoices = 0;
   private telemetry = { blockSize: 0, deadlineRatio: 0, memoryBytes: 0, underruns: 0, lateEvents: 0 };
 
@@ -53,9 +54,11 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       this.stateValue = context.state === "running" ? "running" : "suspended";
       this.lastError = null;
     } catch (error) {
-      this.stateValue = "error";
-      this.lastError = errorMessage(error);
-      this.emit();
+      if (this.stateValue !== "disposed") {
+        this.stateValue = "error";
+        this.lastError = errorMessage(error);
+        this.emit();
+      }
       throw error;
     }
     this.emit();
@@ -135,6 +138,9 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
 
   async dispose() {
     if (this.stateValue === "disposed") return;
+    const rejectInitialization = this.rejectPendingInitialization;
+    this.rejectPendingInitialization = null;
+    rejectInitialization?.(new Error("Sound engine was disposed during startup."));
     this.stopAll();
     this.node?.disconnect();
     this.master?.disconnect();
@@ -223,35 +229,69 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
     // without changing the physical state or offline-reference numerics.
     master.gain.value = 1.0;
     node.connect(master).connect(context.destination);
+    this.node = node;
+    this.master = master;
+
     const initialized = new Promise<void>((resolve, reject) => {
       let settled = false;
 
+      const clearPendingReject = () => {
+        if (this.rejectPendingInitialization === rejectOnce) {
+          this.rejectPendingInitialization = null;
+        }
+      };
+
+      const resolveOnce = () => {
+        if (settled) return;
+        settled = true;
+        clearPendingReject();
+        resolve();
+      };
+
+      const rejectOnce = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        clearPendingReject();
+        reject(error);
+      };
+
+      const isCurrentInitialization = () => (
+        this.stateValue !== "disposed"
+        && this.node === node
+        && this.contextValue === context
+      );
+
       const failInitialization = (message: string) => {
+        if (!isCurrentInitialization()) {
+          rejectOnce(new Error("Sound engine was disposed during startup."));
+          return;
+        }
         this.ready = false;
         this.stateValue = "error";
         this.lastError = message;
         this.emit();
-        if (!settled) {
-          settled = true;
-          reject(new Error(message));
-        }
+        rejectOnce(new Error(message));
       };
+
+      this.rejectPendingInitialization = rejectOnce;
 
       node.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
         const message = event.data;
         if (message.type === "ready") {
+          if (!isCurrentInitialization()) {
+            rejectOnce(new Error("Sound engine was disposed during startup."));
+            return;
+          }
           this.ready = true;
           this.telemetry.memoryBytes = message.memoryBytes;
           this.stateValue = context.state === "running" ? "running" : "suspended";
           this.lastError = null;
           this.emit();
-          if (!settled) {
-            settled = true;
-            resolve();
-          }
+          resolveOnce();
           return;
         }
         if (message.type === "telemetry") {
+          if (!isCurrentInitialization()) return;
           this.telemetry = message;
           this.emit();
           return;
@@ -264,8 +304,6 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       };
     });
 
-    this.node = node;
-    this.master = master;
     await initialized;
   }
 
