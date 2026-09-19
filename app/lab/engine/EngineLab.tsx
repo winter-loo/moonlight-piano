@@ -32,11 +32,13 @@ export function EngineLab() {
   const unsubscribeEngineRef = useRef<(() => void) | null>(null);
   const rafRef = useRef<number | null>(null);
   const logSerialRef = useRef(0);
+  const labAttemptRef = useRef(0);
   const releaseTimersRef = useRef<number[]>([]);
   const frameWindowRef = useRef({ startedAt: 0, lastAt: 0, frames: 0, largestGap: 0 });
   const [selectedEngineId, setSelectedEngineId] = useState<BrowserSoundEngineId>("physical-c4");
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [engineSnapshot, setEngineSnapshot] = useState<SoundEngineSnapshot | null>(null);
+  const [startupError, setStartupError] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [frameHealth, setFrameHealth] = useState({ fps: 0, largestGap: 0 });
   const [pedals, setPedals] = useState({ sustain: 0, sostenuto: 0, unaCorda: 0 });
@@ -44,12 +46,16 @@ export function EngineLab() {
   const disposeEngine = useCallback(async () => {
     releaseTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     releaseTimersRef.current = [];
-    unsubscribeEngineRef.current?.();
+
+    const unsubscribe = unsubscribeEngineRef.current;
     unsubscribeEngineRef.current = null;
+    unsubscribe?.();
+
     const engine = engineRef.current;
     engineRef.current = null;
-    if (engine) await engine.dispose();
     setEngineSnapshot(null);
+
+    if (engine) await engine.dispose();
   }, []);
 
   const activateEngine = useCallback(async (id: BrowserSoundEngineId, context: AudioContext) => {
@@ -92,37 +98,81 @@ export function EngineLab() {
   const stopLab = useCallback(async () => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
-    await disposeEngine();
-    await transportRef.current?.stop();
+
+    const transport = transportRef.current;
     transportRef.current = null;
     setSnapshot(EMPTY_SNAPSHOT);
+
+    await Promise.all([
+      disposeEngine(),
+      transport?.stop(),
+    ]);
   }, [disposeEngine]);
 
   const start = useCallback(async () => {
-    await stopLab();
-    const transport = new PracticeTransport({ bpm: 60, totalBeats: 8, countInBeats: 1 });
-    transportRef.current = transport;
-    const context = await transport.start();
-    const engine = await activateEngine(selectedEngineId, context);
-    setLogs([]);
-    setFrameHealth({ fps: 0, largestGap: 0 });
-    setPedals({ sustain: 0, sostenuto: 0, unaCorda: 0 });
-    frameWindowRef.current = { startedAt: 0, lastAt: 0, frames: 0, largestGap: 0 };
-    for (let beat = -1; beat < 8; beat += 1) {
-      scheduleMetronome(engine, transport.startTime + beat * beatsToSeconds(1, 60), beat % 3 === 0);
+    const attempt = labAttemptRef.current + 1;
+    labAttemptRef.current = attempt;
+    setStartupError(null);
+    try {
+      await stopLab();
+      if (labAttemptRef.current !== attempt) return;
+      const transport = new PracticeTransport({ bpm: 60, totalBeats: 8, countInBeats: 1 });
+      transportRef.current = transport;
+      const context = await transport.start();
+      if (labAttemptRef.current !== attempt) {
+        await transport.stop();
+        return;
+      }
+      const engine = await activateEngine(selectedEngineId, context);
+      if (labAttemptRef.current !== attempt) {
+        await engine.dispose();
+        return;
+      }
+      setLogs([]);
+      setFrameHealth({ fps: 0, largestGap: 0 });
+      setPedals({ sustain: 0, sostenuto: 0, unaCorda: 0 });
+      frameWindowRef.current = { startedAt: 0, lastAt: 0, frames: 0, largestGap: 0 };
+      for (let beat = -1; beat < 8; beat += 1) {
+        scheduleMetronome(engine, transport.startTime + beat * beatsToSeconds(1, 60), beat % 3 === 0);
+      }
+      runAnimation(transport, engine);
+    } catch (error) {
+      if (labAttemptRef.current !== attempt) return;
+      const message = errorMessage(error);
+      await stopLab();
+      if (labAttemptRef.current !== attempt) return;
+      if (message !== "Sound engine was disposed during startup.") {
+        setStartupError(message);
+      }
     }
-    runAnimation(transport, engine);
   }, [activateEngine, runAnimation, selectedEngineId, stopLab]);
 
   const selectEngine = useCallback(async (id: BrowserSoundEngineId) => {
+    const attempt = labAttemptRef.current + 1;
+    labAttemptRef.current = attempt;
     setSelectedEngineId(id);
+    setStartupError(null);
     const transport = transportRef.current;
     const context = transport?.context;
     if (!transport || !context || context.state === "closed") return;
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
-    const engine = await activateEngine(id, context);
-    runAnimation(transport, engine);
-  }, [activateEngine, runAnimation]);
+    try {
+      const engine = await activateEngine(id, context);
+      if (labAttemptRef.current !== attempt) {
+        await engine.dispose();
+        return;
+      }
+      runAnimation(transport, engine);
+    } catch (error) {
+      if (labAttemptRef.current !== attempt) return;
+      const message = errorMessage(error);
+      await stopLab();
+      if (labAttemptRef.current !== attempt) return;
+      if (message !== "Sound engine was disposed during startup.") {
+        setStartupError(message);
+      }
+    }
+  }, [activateEngine, runAnimation, stopLab]);
 
   const record = useCallback((source: string, eventTimeStamp = performance.now(), notes: number[] = [60]) => {
     const transport = transportRef.current;
@@ -191,7 +241,13 @@ export function EngineLab() {
     return () => window.removeEventListener("keydown", keydown);
   }, [record]);
 
+  const stopCurrentLab = useCallback(async () => {
+    labAttemptRef.current += 1;
+    await stopLab();
+  }, [stopLab]);
+
   useEffect(() => () => {
+    labAttemptRef.current += 1;
     void stopLab();
   }, [stopLab]);
 
@@ -225,7 +281,7 @@ export function EngineLab() {
             <div><dt>就绪</dt><dd>{engineSnapshot?.ready ? "是" : "否"}</dd></div>
             <div><dt>活动 voice</dt><dd>{engineSnapshot?.activeVoices ?? 0}</dd></div>
             <div><dt>最后事件</dt><dd>{engineSnapshot?.lastEventType ?? "—"}</dd></div>
-            <div><dt>最后错误</dt><dd>{engineSnapshot?.lastError ?? "—"}</dd></div>
+            <div><dt>最后错误</dt><dd>{engineSnapshot?.lastError ?? startupError ?? "—"}</dd></div>
             <div><dt>路由版本</dt><dd>{engineSnapshot?.routeVersion ?? 0}</dd></div>
             <div><dt>render block</dt><dd>{engineSnapshot?.parameters.blockSize ?? "—"} frames</dd></div>
             <div><dt>deadline ratio</dt><dd>{typeof engineSnapshot?.parameters.renderDeadlineRatio === "number" ? engineSnapshot.parameters.renderDeadlineRatio.toFixed(3) : "—"}</dd></div>
@@ -236,7 +292,7 @@ export function EngineLab() {
           <div className="dialog-actions">
             <button type="button" onClick={() => void start()}><Play size={18} weight="fill" />启动</button>
             <button type="button" onClick={() => void togglePause()}><Pause size={18} weight="fill" />暂停/继续</button>
-            <button type="button" onClick={() => void stopLab()}><Stop size={18} weight="fill" />停止</button>
+            <button type="button" onClick={() => void stopCurrentLab()}><Stop size={18} weight="fill" />停止</button>
           </div>
           <button type="button" className="lab-link" onClick={() => void engineRef.current?.handleRouteChange()}>模拟输出路由变化</button>
         </article>
@@ -308,4 +364,8 @@ export function EngineLab() {
       </section>
     </main>
   );
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
