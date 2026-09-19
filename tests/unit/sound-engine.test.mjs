@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { scheduleMetronome, scheduleMidiTone } from "../../lib/audio/scheduler.ts";
@@ -121,4 +122,31 @@ test("invalid timing and expressive controls are rejected at the boundary", () =
     position: -0.1,
     time: NOW,
   }), /Pedal position/);
+});
+
+
+test("EngineLab detaches shared refs before awaiting slow cleanup", async () => {
+  const source = await readFile("app/lab/engine/EngineLab.tsx", "utf8");
+
+  const stopStart = source.indexOf("  const stopLab = useCallback(async () => {");
+  const stopEnd = source.indexOf("\n  const start = useCallback", stopStart);
+  const stopBody = source.slice(stopStart, stopEnd);
+  const stopAwait = stopBody.indexOf("await Promise.all");
+
+  assert.ok(stopAwait > 0);
+  assert.ok(stopBody.indexOf("transportRef.current = null") < stopAwait);
+  assert.ok(stopBody.indexOf("setSnapshot(EMPTY_SNAPSHOT)") < stopAwait);
+  assert.equal(stopBody.slice(stopAwait).includes("transportRef.current = null"), false);
+  assert.equal(stopBody.slice(stopAwait).includes("setSnapshot(EMPTY_SNAPSHOT)"), false);
+
+  const disposeStart = source.indexOf("  const disposeEngine = useCallback(async () => {");
+  const disposeEnd = source.indexOf("\n  const activateEngine", disposeStart);
+  const disposeBody = source.slice(disposeStart, disposeEnd);
+  const disposeAwait = disposeBody.indexOf("await engine.dispose()");
+
+  assert.ok(disposeAwait > 0);
+  assert.ok(disposeBody.indexOf("engineRef.current = null") < disposeAwait);
+  assert.ok(disposeBody.indexOf("setEngineSnapshot(null)") < disposeAwait);
+  assert.equal(disposeBody.slice(disposeAwait).includes("engineRef.current = null"), false);
+  assert.equal(disposeBody.slice(disposeAwait).includes("setEngineSnapshot(null)"), false);
 });
