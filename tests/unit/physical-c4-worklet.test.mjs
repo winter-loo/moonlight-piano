@@ -424,3 +424,35 @@ test("failed worklet initialization releases its graph before retry", async (t) 
   assert.equal(secondNode.disconnectCount >= 1, true);
   assert.equal(gains[1].disconnectCount >= 1, true);
 });
+
+
+test("dispose becomes terminal before an owned AudioContext finishes closing", async () => {
+  const { PhysicalC4WorkletEngine } = await import("../../lib/audio/physical-c4-worklet-engine.ts");
+
+  let resolveClose;
+  const closePromise = new Promise((resolve) => {
+    resolveClose = resolve;
+  });
+  const context = {
+    state: "running",
+    sampleRate: 48_000,
+    currentTime: 1,
+    baseLatency: 0.01,
+    outputLatency: 0.02,
+    async close() {
+      await closePromise;
+      this.state = "closed";
+    },
+  };
+
+  const engine = new PhysicalC4WorkletEngine({ context, ownsContext: true });
+  const disposing = engine.dispose();
+
+  assert.equal(engine.snapshot().state, "disposed");
+  await assert.rejects(engine.start(), /disposed/);
+  await assert.rejects(engine.resume(), /disposed/);
+
+  resolveClose();
+  await disposing;
+  assert.equal(engine.snapshot().state, "disposed");
+});
