@@ -34,6 +34,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
   private lastError: string | null = null;
   private routeVersion = 0;
   private ready = false;
+  private initializationPromise: Promise<void> | null = null;
   private rejectPendingInitialization: ((error: Error) => void) | null = null;
   private activeVoices = 0;
   private telemetry = { blockSize: 0, deadlineRatio: 0, memoryBytes: 0, underruns: 0, lateEvents: 0 };
@@ -49,7 +50,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
     this.emit();
     try {
       const context = this.ensureContext();
-      if (!this.node) await this.initializeWorklet(context);
+      if (!this.ready) await this.ensureWorkletReady(context);
       if (context.state === "suspended") await context.resume();
       this.stateValue = context.state === "running" ? "running" : "suspended";
       this.lastError = null;
@@ -208,6 +209,20 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
     if (typeof window === "undefined" || !window.AudioContext) throw new Error("Web Audio is unavailable.");
     this.contextValue = new window.AudioContext({ latencyHint: "interactive" });
     return this.contextValue;
+  }
+
+  private ensureWorkletReady(context: AudioContext) {
+    if (this.ready) return Promise.resolve();
+    if (this.initializationPromise) return this.initializationPromise;
+
+    const pending = this.initializeWorklet(context);
+    const tracked = pending.finally(() => {
+      if (this.initializationPromise === tracked) {
+        this.initializationPromise = null;
+      }
+    });
+    this.initializationPromise = tracked;
+    return tracked;
   }
 
   private async initializeWorklet(context: AudioContext) {
