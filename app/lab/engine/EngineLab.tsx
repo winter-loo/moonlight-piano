@@ -46,12 +46,16 @@ export function EngineLab() {
   const disposeEngine = useCallback(async () => {
     releaseTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     releaseTimersRef.current = [];
-    unsubscribeEngineRef.current?.();
+
+    const unsubscribe = unsubscribeEngineRef.current;
     unsubscribeEngineRef.current = null;
+    unsubscribe?.();
+
     const engine = engineRef.current;
     engineRef.current = null;
-    if (engine) await engine.dispose();
     setEngineSnapshot(null);
+
+    if (engine) await engine.dispose();
   }, []);
 
   const activateEngine = useCallback(async (id: BrowserSoundEngineId, context: AudioContext) => {
@@ -94,10 +98,15 @@ export function EngineLab() {
   const stopLab = useCallback(async () => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
-    await disposeEngine();
-    await transportRef.current?.stop();
+
+    const transport = transportRef.current;
     transportRef.current = null;
     setSnapshot(EMPTY_SNAPSHOT);
+
+    await Promise.all([
+      disposeEngine(),
+      transport?.stop(),
+    ]);
   }, [disposeEngine]);
 
   const start = useCallback(async () => {
