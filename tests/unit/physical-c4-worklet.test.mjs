@@ -222,13 +222,16 @@ test("disposing during startup rejects the pending start and ignores a late read
     await new Promise((resolve) => setImmediate(resolve));
   }
   const node = FakeAudioWorkletNode.instances[0];
+  const staleHandler = node.port.onmessage;
 
   await engine.dispose();
   await assert.rejects(started, /disposed during startup/);
   assert.equal(engine.snapshot().state, "disposed");
   assert.equal(engine.snapshot().ready, false);
+  assert.equal(node.port.onmessage, null);
+  assert.equal(node.onprocessorerror, null);
 
-  node.port.onmessage({
+  staleHandler({
     data: { type: "ready", memoryBytes: 65_536 },
   });
   await new Promise((resolve) => setImmediate(resolve));
