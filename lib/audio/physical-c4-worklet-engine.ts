@@ -214,97 +214,121 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
     if (!context.audioWorklet || typeof AudioWorkletNode === "undefined") {
       throw new Error("AudioWorklet is unavailable in this browser.");
     }
-    const response = await fetch("/audio/moonlight_wasm.wasm", { cache: "no-store" });
-    if (!response.ok) throw new Error(`Rust WASM unavailable (HTTP ${response.status}). Run npm run audio:wasm first.`);
-    const wasmBytes = await response.arrayBuffer();
-    await context.audioWorklet.addModule("/audio/physical-c4-worklet.js");
-    const node = new AudioWorkletNode(context, "moonlight-physical-c4", {
-      numberOfInputs: 0,
-      numberOfOutputs: 1,
-      outputChannelCount: [1],
-      processorOptions: { wasmBytes },
+
+    let rejectCancellation: ((error: Error) => void) | null = null;
+    let cancelled = false;
+    const cancellation = new Promise<never>((_resolve, reject) => {
+      rejectCancellation = reject;
     });
-    const master = context.createGain();
-    // Lab calibration is intentionally outside the Rust model so A/B loudness can be adjusted
-    // without changing the physical state or offline-reference numerics.
-    master.gain.value = 1.0;
-    node.connect(master).connect(context.destination);
-    this.node = node;
-    this.master = master;
+    const cancelInitialization = (error: Error) => {
+      if (cancelled) return;
+      cancelled = true;
+      rejectCancellation?.(error);
+    };
+    const waitFor = <T>(operation: Promise<T>) => Promise.race([operation, cancellation]);
+    const assertCurrent = () => {
+      if (this.isDisposed() || this.contextValue !== context) {
+        throw new Error("Sound engine was disposed during startup.");
+      }
+    };
 
-    const initialized = new Promise<void>((resolve, reject) => {
-      let settled = false;
+    this.rejectPendingInitialization = cancelInitialization;
 
-      const clearPendingReject = () => {
-        if (this.rejectPendingInitialization === rejectOnce) {
-          this.rejectPendingInitialization = null;
-        }
-      };
+    try {
+      const response = await waitFor(fetch("/audio/moonlight_wasm.wasm", { cache: "no-store" }));
+      assertCurrent();
+      if (!response.ok) {
+        throw new Error(`Rust WASM unavailable (HTTP ${response.status}). Run npm run audio:wasm first.`);
+      }
 
-      const resolveOnce = () => {
-        if (settled) return;
-        settled = true;
-        clearPendingReject();
-        resolve();
-      };
+      const wasmBytes = await waitFor(response.arrayBuffer());
+      assertCurrent();
 
-      const rejectOnce = (error: Error) => {
-        if (settled) return;
-        settled = true;
-        clearPendingReject();
-        reject(error);
-      };
+      await waitFor(context.audioWorklet.addModule("/audio/physical-c4-worklet.js"));
+      assertCurrent();
 
-      const isCurrentInitialization = () => (
-        !this.isDisposed()
-        && this.node === node
-        && this.contextValue === context
-      );
+      const node = new AudioWorkletNode(context, "moonlight-physical-c4", {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+        processorOptions: { wasmBytes },
+      });
+      const master = context.createGain();
+      // Lab calibration is intentionally outside the Rust model so A/B loudness can be adjusted
+      // without changing the physical state or offline-reference numerics.
+      master.gain.value = 1.0;
+      node.connect(master).connect(context.destination);
+      this.node = node;
+      this.master = master;
 
-      const failInitialization = (message: string) => {
-        if (!isCurrentInitialization()) {
-          rejectOnce(new Error("Sound engine was disposed during startup."));
-          return;
-        }
-        this.ready = false;
-        this.stateValue = "error";
-        this.lastError = message;
-        this.emit();
-        rejectOnce(new Error(message));
-      };
+      const ready = new Promise<void>((resolve, reject) => {
+        let settled = false;
 
-      this.rejectPendingInitialization = rejectOnce;
+        const resolveOnce = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
 
-      node.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
-        const message = event.data;
-        if (message.type === "ready") {
+        const rejectOnce = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          reject(error);
+        };
+
+        const isCurrentInitialization = () => (
+          !this.isDisposed()
+          && this.node === node
+          && this.contextValue === context
+        );
+
+        const failInitialization = (message: string) => {
           if (!isCurrentInitialization()) {
             rejectOnce(new Error("Sound engine was disposed during startup."));
             return;
           }
-          this.ready = true;
-          this.telemetry.memoryBytes = message.memoryBytes;
-          this.stateValue = context.state === "running" ? "running" : "suspended";
-          this.lastError = null;
+          this.ready = false;
+          this.stateValue = "error";
+          this.lastError = message;
           this.emit();
-          resolveOnce();
-          return;
-        }
-        if (message.type === "telemetry") {
-          if (!isCurrentInitialization()) return;
-          this.telemetry = message;
-          this.emit();
-          return;
-        }
-        failInitialization(message.message);
-      };
+          rejectOnce(new Error(message));
+        };
 
-      node.onprocessorerror = () => {
-        failInitialization("AudioWorklet processor failed.");
-      };
-    });
+        node.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
+          const message = event.data;
+          if (message.type === "ready") {
+            if (!isCurrentInitialization()) {
+              rejectOnce(new Error("Sound engine was disposed during startup."));
+              return;
+            }
+            this.ready = true;
+            this.telemetry.memoryBytes = message.memoryBytes;
+            this.stateValue = context.state === "running" ? "running" : "suspended";
+            this.lastError = null;
+            this.emit();
+            resolveOnce();
+            return;
+          }
+          if (message.type === "telemetry") {
+            if (!isCurrentInitialization()) return;
+            this.telemetry = message;
+            this.emit();
+            return;
+          }
+          failInitialization(message.message);
+        };
 
-    await initialized;
+        node.onprocessorerror = () => {
+          failInitialization("AudioWorklet processor failed.");
+        };
+      });
+
+      await waitFor(ready);
+    } finally {
+      if (this.rejectPendingInitialization === cancelInitialization) {
+        this.rejectPendingInitialization = null;
+      }
+    }
   }
 
   private isDisposed() {
