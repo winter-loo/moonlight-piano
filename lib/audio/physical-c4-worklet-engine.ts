@@ -66,6 +66,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
   }
 
   async resume() {
+    this.assertUsable();
     const context = this.ensureContext();
     try {
       if (context.state === "suspended") await context.resume();
@@ -139,20 +140,25 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
 
   async dispose() {
     if (this.stateValue === "disposed") return;
+
+    this.stateValue = "disposed";
     const rejectInitialization = this.rejectPendingInitialization;
     this.rejectPendingInitialization = null;
     rejectInitialization?.(new Error("Sound engine was disposed during startup."));
+
     this.stopAll();
     const node = this.node;
     const master = this.master;
     if (node || master) this.releaseWorkletGraph(node, master);
+
     const context = this.contextValue;
-    if (context && this.ownsContext && context.state !== "closed") await context.close();
     this.contextValue = null;
     this.ready = false;
-    this.stateValue = "disposed";
+    this.activeVoices = 0;
     this.emit();
     this.listeners.clear();
+
+    if (context && this.ownsContext && context.state !== "closed") await context.close();
   }
 
   clock(): SoundEngineClock {
