@@ -309,3 +309,118 @@ test("disposing while WASM fetch is pending cancels startup before a worklet nod
   assert.equal(nodeCount, 0);
   assert.equal(engine.snapshot().state, "disposed");
 });
+
+
+test("failed worklet initialization releases its graph before retry", async (t) => {
+  const { PhysicalC4WorkletEngine } = await import("../../lib/audio/physical-c4-worklet-engine.ts");
+
+  const originalNode = globalThis.AudioWorkletNode;
+  const originalFetch = globalThis.fetch;
+
+  class FakeAudioWorkletNode {
+    static instances = [];
+
+    constructor() {
+      this.disconnectCount = 0;
+      this.port = {
+        onmessage: null,
+        postMessage() {},
+      };
+      this.onprocessorerror = null;
+      FakeAudioWorkletNode.instances.push(this);
+    }
+
+    connect() {
+      return this;
+    }
+
+    disconnect() {
+      this.disconnectCount += 1;
+    }
+  }
+
+  const gains = [];
+  const context = {
+    state: "running",
+    sampleRate: 48_000,
+    currentTime: 1,
+    baseLatency: 0.01,
+    outputLatency: 0.02,
+    destination: {},
+    audioWorklet: {
+      async addModule() {},
+    },
+    createGain() {
+      const gain = {
+        gain: { value: 0 },
+        disconnectCount: 0,
+        connect() {
+          return this;
+        },
+        disconnect() {
+          this.disconnectCount += 1;
+        },
+      };
+      gains.push(gain);
+      return gain;
+    },
+    async resume() {},
+    async suspend() {},
+    async close() {
+      this.state = "closed";
+    },
+  };
+
+  globalThis.AudioWorkletNode = FakeAudioWorkletNode;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async arrayBuffer() {
+      return new ArrayBuffer(8);
+    },
+  });
+
+  t.after(() => {
+    if (originalNode === undefined) delete globalThis.AudioWorkletNode;
+    else globalThis.AudioWorkletNode = originalNode;
+    globalThis.fetch = originalFetch;
+  });
+
+  const engine = new PhysicalC4WorkletEngine({ context, ownsContext: false });
+  const firstStart = engine.start();
+
+  while (FakeAudioWorkletNode.instances.length < 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  const firstNode = FakeAudioWorkletNode.instances[0];
+  firstNode.port.onmessage({
+    data: { type: "error", message: "first init failed" },
+  });
+
+  await assert.rejects(firstStart, /first init failed/);
+  assert.equal(firstNode.disconnectCount >= 1, true);
+  assert.equal(gains[0].disconnectCount >= 1, true);
+  assert.equal(firstNode.port.onmessage, null);
+  assert.equal(firstNode.onprocessorerror, null);
+  assert.equal(engine.snapshot().ready, false);
+
+  const retry = engine.start();
+  while (FakeAudioWorkletNode.instances.length < 2) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  const secondNode = FakeAudioWorkletNode.instances[1];
+  assert.notEqual(secondNode, firstNode);
+  assert.equal(gains.length, 2);
+
+  secondNode.port.onmessage({
+    data: { type: "ready", memoryBytes: 65_536 },
+  });
+  await retry;
+  assert.equal(engine.snapshot().ready, true);
+
+  await engine.dispose();
+  assert.equal(secondNode.disconnectCount >= 1, true);
+  assert.equal(gains[1].disconnectCount >= 1, true);
+});
