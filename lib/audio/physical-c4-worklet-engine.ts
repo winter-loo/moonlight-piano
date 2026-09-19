@@ -143,10 +143,9 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
     this.rejectPendingInitialization = null;
     rejectInitialization?.(new Error("Sound engine was disposed during startup."));
     this.stopAll();
-    this.node?.disconnect();
-    this.master?.disconnect();
-    this.node = null;
-    this.master = null;
+    const node = this.node;
+    const master = this.master;
+    if (node || master) this.releaseWorkletGraph(node, master);
     const context = this.contextValue;
     if (context && this.ownsContext && context.state !== "closed") await context.close();
     this.contextValue = null;
@@ -265,19 +264,21 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       await waitFor(context.audioWorklet.addModule("/audio/physical-c4-worklet.js"));
       assertCurrent();
 
-      node = new AudioWorkletNode(context, "moonlight-physical-c4", {
+      const createdNode = new AudioWorkletNode(context, "moonlight-physical-c4", {
         numberOfInputs: 0,
         numberOfOutputs: 1,
         outputChannelCount: [1],
         processorOptions: { wasmBytes },
       });
-      master = context.createGain();
+      const createdMaster = context.createGain();
+      node = createdNode;
+      master = createdMaster;
       // Lab calibration is intentionally outside the Rust model so A/B loudness can be adjusted
       // without changing the physical state or offline-reference numerics.
-      master.gain.value = 1.0;
-      node.connect(master).connect(context.destination);
-      this.node = node;
-      this.master = master;
+      createdMaster.gain.value = 1.0;
+      createdNode.connect(createdMaster).connect(context.destination);
+      this.node = createdNode;
+      this.master = createdMaster;
 
       const ready = new Promise<void>((resolve, reject) => {
         let settled = false;
@@ -296,23 +297,25 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
 
         const isCurrentInitialization = () => (
           !this.isDisposed()
-          && this.node === node
+          && this.node === createdNode
           && this.contextValue === context
         );
 
         const failInitialization = (message: string) => {
           if (!isCurrentInitialization()) {
+            this.releaseWorkletGraph(createdNode, createdMaster);
             rejectOnce(new Error("Sound engine was disposed during startup."));
             return;
           }
           this.ready = false;
+          this.releaseWorkletGraph(createdNode, createdMaster);
           this.stateValue = "error";
           this.lastError = message;
           this.emit();
           rejectOnce(new Error(message));
         };
 
-        node.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
+        createdNode.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
           const message = event.data;
           if (message.type === "ready") {
             if (!isCurrentInitialization()) {
@@ -336,37 +339,41 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
           failInitialization(message.message);
         };
 
-        node.onprocessorerror = () => {
+        createdNode.onprocessorerror = () => {
           failInitialization("AudioWorklet processor failed.");
         };
       });
 
       await waitFor(ready);
     } catch (error) {
-      if (node) {
-        node.port.onmessage = null;
-        node.onprocessorerror = null;
-        try {
-          node.disconnect();
-        } catch {
-          // The graph may already have been disconnected by dispose().
-        }
-      }
-      if (master) {
-        try {
-          master.disconnect();
-        } catch {
-          // The graph may already have been disconnected by dispose().
-        }
-      }
-      if (this.node === node) this.node = null;
-      if (this.master === master) this.master = null;
+      if (node || master) this.releaseWorkletGraph(node, master);
       this.ready = false;
       throw error;
     } finally {
       if (this.rejectPendingInitialization === cancelInitialization) {
         this.rejectPendingInitialization = null;
       }
+    }
+  }
+
+  private releaseWorkletGraph(node: AudioWorkletNode | null, master: GainNode | null) {
+    if (node) {
+      node.port.onmessage = null;
+      node.onprocessorerror = null;
+      try {
+        node.disconnect();
+      } catch {
+        // The graph may already have been disconnected by another lifecycle path.
+      }
+      if (this.node === node) this.node = null;
+    }
+    if (master) {
+      try {
+        master.disconnect();
+      } catch {
+        // The graph may already have been disconnected by another lifecycle path.
+      }
+      if (this.master === master) this.master = null;
     }
   }
 
