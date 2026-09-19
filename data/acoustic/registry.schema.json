@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moonlight-piano.local/schemas/acoustic-registry-v1.json",
+  "title": "Moonlight acoustic evidence registry",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "registryId",
+    "updatedAt",
+    "sources"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "registryId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date"
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "status",
+          "origin",
+          "retrievedAt",
+          "license",
+          "permittedUse",
+          "processing",
+          "assets"
+        ]
+      }
+    }
+  },
+  "additionalProperties": false
+}
