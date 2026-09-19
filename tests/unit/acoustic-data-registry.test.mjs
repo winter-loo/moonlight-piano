@@ -1,0 +1,334 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {
+  RegistryError,
+  buildProvenanceReport,
+  gitBlobSha1,
+  loadAndValidateRegistry,
+  provenanceReportMarkdown,
+  sealHoldoutManifest,
+  validateRegistryDocument,
+  verifyAssetBuffer,
+} from "../../scripts/acoustic-data-registry.mjs";
+
+const ROOT = path.resolve(import.meta.dirname, "../..");
+
+async function fixtureDocuments() {
+  return Promise.all([
+    readJson("data/acoustic/registry.json"),
+    readJson("data/acoustic/license-policy.json"),
+    readJson("data/acoustic/development-splits.json"),
+    readJson("data/acoustic/holdout/protocol.json"),
+  ]);
+}
+
+async function readJson(relativePath) {
+  return JSON.parse(await readFile(path.join(ROOT, relativePath), "utf8"));
+}
+
+test("the committed registry and sealed-access protocol validate", async () => {
+  const result = await loadAndValidateRegistry();
+  assert.equal(result.registry.sources[0].id, "salamander-tonejs-c4");
+  assert.equal(result.holdout.repositoryContainsData, false);
+  assert.equal(result.holdout.access.reveal, "one-shot-after-candidate-freeze");
+});
+
+test("Git blob integrity detects byte changes", async () => {
+  const [registry] = await fixtureDocuments();
+  const asset = registry.sources[0].assets[0];
+  const buffer = Buffer.from("fixture");
+  assert.equal(gitBlobSha1(buffer), "001f1993905d81b471eeaa840432cf35aedaea61");
+  assert.throws(() => verifyAssetBuffer(registry.sources[0].id, asset, buffer), (error) => error instanceof RegistryError && error.code === "INTEGRITY_MISMATCH");
+});
+
+test("missing attribution and unknown licenses fail closed", async () => {
+  const [registry, policy, splits, holdout] = await fixtureDocuments();
+  const missingAttribution = structuredClone(registry);
+  missingAttribution.sources[0].license.attribution = "";
+  assert.throws(() => validateRegistryDocument(missingAttribution, policy, splits, holdout), /attribution is required/);
+  const unknownLicense = structuredClone(registry);
+  unknownLicense.sources[0].license.spdx = "Custom-Maybe";
+  assert.throws(() => validateRegistryDocument(unknownLicense, policy, splits, holdout), /unknown or ambiguous license/);
+});
+
+test("license policy rules validate field types and fitting-policy enums before use", async () => {
+  const [registry, policy, splits, holdout] = await fixtureDocuments();
+  const malformed = structuredClone(policy);
+  malformed.licenses["CC-BY-NC-4.0"].commercialUse = "false";
+  delete malformed.licenses["CC-BY-NC-4.0"].modelParameterFitting;
+  assert.throws(
+    () => validateRegistryDocument(registry, malformed, splits, holdout),
+    /commercialUse must be boolean|modelParameterFitting must be a supported policy value/,
+  );
+});
+
+test("asset URLs must match the declared distribution repository and commit", async () => {
+  const [registry, policy, splits, holdout] = await fixtureDocuments();
+  const wrongCommit = structuredClone(registry);
+  wrongCommit.sources[0].origin.distributionCommit = "0".repeat(40);
+  assert.throws(
+    () => validateRegistryDocument(wrongCommit, policy, splits, holdout),
+    /URL commit .* does not match declared/,
+  );
+  const wrongRepository = structuredClone(registry);
+  wrongRepository.sources[0].origin.distributionRepository = "other/project";
+  assert.throws(
+    () => validateRegistryDocument(wrongRepository, policy, splits, holdout),
+    /URL repository .* does not match declared/,
+  );
+});
+
+test("non-commercial and uncleared share-alike sources cannot enter product fitting", async () => {
+  const [registry, policy, splits, holdout] = await fixtureDocuments();
+  const nonCommercial = structuredClone(registry);
+  nonCommercial.sources[0].license.spdx = "CC-BY-NC-SA-4.0";
+  assert.throws(() => validateRegistryDocument(nonCommercial, policy, splits, holdout), /non-commercial license|isolates this source/);
+  const shareAlike = structuredClone(registry);
+  shareAlike.sources[0].license.spdx = "CC-BY-SA-4.0";
+  assert.throws(() => validateRegistryDocument(shareAlike, policy, splits, holdout), /requires registered legal clearance/);
+});
+
+test("inspectable splits cannot contain unknown, mismatched, or duplicate assets", async () => {
+  const [registry, policy, splits, holdout] = await fixtureDocuments();
+  const duplicate = structuredClone(splits);
+  duplicate.roles.developmentValidation.push("salamander-tonejs-c4:c4-mp3");
+  assert.throws(() => validateRegistryDocument(registry, policy, duplicate, holdout), /assigned to developmentValidation|more than one inspectable split/);
+});
+
+test("license evidence must be an independently checksummed text asset", async () => {
+  const [registry, policy, splits, holdout] = await fixtureDocuments();
+  const wrongEvidence = structuredClone(registry);
+  wrongEvidence.sources[0].license.evidenceAssetId = "c4-mp3";
+  assert.throws(() => validateRegistryDocument(wrongEvidence, policy, splits, holdout), /license evidence must be a text asset/);
+});
+
+test("holdout protocol rejects committed locators or developer access", async () => {
+  const [registry, policy, splits, holdout] = await fixtureDocuments();
+  const exposed = structuredClone(holdout);
+  exposed.repositoryContainsLocators = true;
+  exposed.access.deniedActors = ["automation-agents"];
+  assert.throws(() => validateRegistryDocument(registry, policy, splits, exposed), /locators must remain outside|deny developers/);
+});
+
+test("sealing binds candidate bytes and publishes commitments only", async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), "moonlight-holdout-"));
+  const manifestPath = path.join(temp, "private-manifest.json");
+  const manifestNoncePath = path.join(temp, "manifest-nonce.bin");
+  const candidateArtifactPath = path.join(temp, "candidate-001.mlpiano");
+  const metricPlanPath = path.join(temp, "metric-plan.json");
+  const outputPath = path.join(temp, "commitment.json");
+  await writeFile(manifestPath, '{"secretAsset":"never-publish.wav","label":"fail"}\n');
+  await writeFile(manifestNoncePath, Buffer.alloc(32, 0x5a));
+  await writeFile(candidateArtifactPath, "frozen-candidate-bytes-v1\n");
+  await writeFile(metricPlanPath, JSON.stringify({
+    schemaVersion: 1,
+    metrics: [{ id: "spectral-distance", threshold: 0.1 }],
+    statisticalMethod: "predeclared aggregate comparison",
+    failureCriteria: "fail if any metric exceeds its threshold",
+  }));
+  const receipt = await sealHoldoutManifest({
+    manifestPath,
+    manifestNoncePath,
+    candidateId: "candidate-001",
+    candidateArtifactPath,
+    metricPlanPath,
+    outputPath,
+    custodian: "independent-reviewer",
+  });
+  const published = await readFile(outputPath, "utf8");
+  assert.equal(receipt.candidateId, "candidate-001");
+  assert.match(published, /candidateArtifactSha256/);
+  assert.match(published, /manifestCommitmentSha256/);
+  assert.doesNotMatch(published, /never-publish|spectral-distance|frozen-candidate-bytes|"label"|manifest-nonce/);
+
+  await writeFile(candidateArtifactPath, "rebuilt-candidate-bytes-v2\n");
+  const rebuiltOutput = path.join(temp, "rebuilt-commitment.json");
+  const rebuilt = await sealHoldoutManifest({
+    manifestPath,
+    manifestNoncePath,
+    candidateId: "candidate-001",
+    candidateArtifactPath,
+    metricPlanPath,
+    outputPath: rebuiltOutput,
+    custodian: "independent-reviewer",
+  });
+  assert.notEqual(rebuilt.candidateArtifactSha256, receipt.candidateArtifactSha256);
+
+  const inRepoManifest = path.join(ROOT, "work-would-be-private.json");
+  await assert.rejects(
+    () => sealHoldoutManifest({
+      manifestPath: inRepoManifest,
+      manifestNoncePath,
+      candidateId: "candidate-002",
+      candidateArtifactPath,
+      metricPlanPath,
+      outputPath,
+      custodian: "reviewer",
+    }),
+    /must live outside the repository/,
+  );
+});
+
+test("a tampered ingestion receipt cannot enter a provenance report", async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), "moonlight-receipt-"));
+  const [registry] = await fixtureDocuments();
+  const source = registry.sources[0];
+  await writeFile(path.join(temp, `${source.id}.json`), `${JSON.stringify({
+    schemaVersion: 1,
+    sourceId: source.id,
+    sourceStatus: source.status,
+    distributionCommit: source.origin.distributionCommit,
+    license: source.license.spdx,
+    attribution: source.license.attribution,
+    rawCommitPolicy: "never-commit",
+    assets: source.assets.map((asset) => ({
+      assetId: asset.id,
+      role: asset.role,
+      expectedBytes: asset.expectedBytes,
+      actualBytes: asset.expectedBytes,
+      gitSha1: asset.integrity.value,
+      sha256: "0".repeat(64),
+    })),
+  }, null, 2)}
+`);
+  await assert.rejects(() => buildProvenanceReport({ receiptsDirectory: temp }), /does not prove the registered bytes/);
+});
+
+test("CI guards every indexed raw asset and validates pushes to main", async () => {
+  const workflow = await readFile(path.join(ROOT, ".github/workflows/acoustic-data-registry.yml"), "utf8");
+  assert.match(workflow, /- main/);
+  assert.match(workflow, /git ls-files -- work\/acoustic-data\/raw/);
+});
+
+test("calibration rejects research-only or non-fitting evidence", async () => {
+  const [registry, policy, splits, holdout] = await fixtureDocuments();
+  const restricted = structuredClone(registry);
+  restricted.sources[0].status = "research-only";
+  restricted.sources[0].license.spdx = "CC-BY-NC-4.0";
+  restricted.sources[0].permittedUse.commercial = false;
+  restricted.sources[0].permittedUse.modelParameterFitting = false;
+  assert.throws(
+    () => validateRegistryDocument(restricted, policy, splits, holdout),
+    /cannot enter calibration without product-eligible commercial fitting permission/,
+  );
+});
+
+test("holdout permitted actors are custodian-only and disjoint from denied actors", async () => {
+  const [registry, policy, splits, holdout] = await fixtureDocuments();
+  const contradictory = structuredClone(holdout);
+  contradictory.access.permittedActors.push("developers");
+  assert.throws(
+    () => validateRegistryDocument(registry, policy, splits, contradictory),
+    /permittedActors must contain only release-gate-custodian|must be disjoint/,
+  );
+});
+
+test("source IDs and asset filenames cannot escape the acoustic work directory", async () => {
+  const [registry, policy, splits, holdout] = await fixtureDocuments();
+  const badId = structuredClone(registry);
+  badId.sources[0].id = "../../../escape";
+  badId.sources[0].assets[0].id = "c4-mp3";
+  const badSplits = structuredClone(splits);
+  badSplits.roles.calibration = ["../../../escape:c4-mp3"];
+  assert.throws(
+    () => validateRegistryDocument(badId, policy, badSplits, holdout),
+    /id must be a safe single path segment/,
+  );
+
+  const badFile = structuredClone(registry);
+  badFile.sources[0].assets[0].fileName = "../../../../package.json";
+  assert.throws(
+    () => validateRegistryDocument(badFile, policy, splits, holdout),
+    /fileName must be a basename confined to the source raw directory/,
+  );
+});
+
+test("share-alike product fitting requires a matching checksummed clearance record", async () => {
+  const [registry, policy, splits, holdout] = await fixtureDocuments();
+  const shareAlike = structuredClone(registry);
+  shareAlike.sources[0].license.spdx = "CC-BY-SA-4.0";
+  shareAlike.sources[0].license.clearanceId = "clearance-salamander";
+  assert.throws(
+    () => validateRegistryDocument(shareAlike, policy, splits, holdout),
+    /requires registered legal clearance/,
+  );
+
+  const clearances = {
+    schemaVersion: 1,
+    clearances: [{
+      id: "clearance-salamander",
+      sourceId: "salamander-tonejs-c4",
+      licenseSpdx: "CC-BY-SA-4.0",
+      status: "approved-for-product-model-fitting",
+      reviewer: "independent-legal-review",
+      decidedAt: "2026-09-07",
+      evidenceSha256: "a".repeat(64),
+    }],
+  };
+  assert.doesNotThrow(
+    () => validateRegistryDocument(shareAlike, policy, splits, holdout, clearances),
+  );
+});
+
+test("holdout sealing rejects weak nonce and incomplete metric plans", async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), "moonlight-holdout-invalid-"));
+  const manifestPath = path.join(temp, "private-manifest.json");
+  const manifestNoncePath = path.join(temp, "manifest-nonce.bin");
+  const candidateArtifactPath = path.join(temp, "candidate.mlpiano");
+  const metricPlanPath = path.join(temp, "metric-plan.json");
+  const outputPath = path.join(temp, "commitment.json");
+  await writeFile(manifestPath, '{"private":true}');
+  await writeFile(manifestNoncePath, "too-short");
+  await writeFile(candidateArtifactPath, "candidate");
+  await writeFile(metricPlanPath, '{"schemaVersion":1,"metrics":[]}');
+
+  await assert.rejects(
+    () => sealHoldoutManifest({
+      manifestPath,
+      manifestNoncePath,
+      candidateId: "candidate-weak",
+      candidateArtifactPath,
+      metricPlanPath,
+      outputPath,
+      custodian: "release-gate-custodian",
+    }),
+    /nonce must contain at least 32 bytes/,
+  );
+
+  await writeFile(manifestNoncePath, Buffer.alloc(32, 0x42));
+  await assert.rejects(
+    () => sealHoldoutManifest({
+      manifestPath,
+      manifestNoncePath,
+      candidateId: "candidate-bad-plan",
+      candidateArtifactPath,
+      metricPlanPath,
+      outputPath,
+      custodian: "release-gate-custodian",
+    }),
+    /metric plan must freeze metrics, thresholds, statisticalMethod, and failureCriteria/,
+  );
+});
+
+test("CI is validation-only and ingests every applicable registered source", async () => {
+  const workflow = await readFile(path.join(ROOT, ".github/workflows/acoustic-data-registry.yml"), "utf8");
+  const packageJson = JSON.parse(await readFile(path.join(ROOT, "package.json"), "utf8"));
+  assert.equal(packageJson.scripts["acoustic:ingest:all"], "node scripts/acoustic-data-registry.mjs ingest-all --output work/acoustic-data");
+  assert.match(workflow, /npm run acoustic:ingest:all/);
+  assert.match(workflow, /permissions:\s*\n\s*contents: read/);
+  assert.doesNotMatch(workflow, /git push|apply-acoustic-round2|contents: write/);
+});
+
+test("the provenance report is attachable without exposing raw data", async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), "moonlight-report-"));
+  const report = await buildProvenanceReport({ receiptsDirectory: temp });
+  const markdown = provenanceReportMarkdown(report);
+  assert.match(markdown, /Salamander Grand Piano C4 reference probe/);
+  assert.match(markdown, /CC-BY-3.0/);
+  assert.match(markdown, /external-custodian/);
+  assert.doesNotMatch(markdown, /private-manifest|outer.*\.wav/i);
+});
