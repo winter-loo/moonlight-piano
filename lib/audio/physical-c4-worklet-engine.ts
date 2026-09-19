@@ -249,6 +249,9 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
 
     this.rejectPendingInitialization = cancelInitialization;
 
+    let node: AudioWorkletNode | null = null;
+    let master: GainNode | null = null;
+
     try {
       const response = await waitFor(fetch("/audio/moonlight_wasm.wasm", { cache: "no-store" }));
       assertCurrent();
@@ -262,13 +265,13 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       await waitFor(context.audioWorklet.addModule("/audio/physical-c4-worklet.js"));
       assertCurrent();
 
-      const node = new AudioWorkletNode(context, "moonlight-physical-c4", {
+      node = new AudioWorkletNode(context, "moonlight-physical-c4", {
         numberOfInputs: 0,
         numberOfOutputs: 1,
         outputChannelCount: [1],
         processorOptions: { wasmBytes },
       });
-      const master = context.createGain();
+      master = context.createGain();
       // Lab calibration is intentionally outside the Rust model so A/B loudness can be adjusted
       // without changing the physical state or offline-reference numerics.
       master.gain.value = 1.0;
@@ -339,6 +342,27 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       });
 
       await waitFor(ready);
+    } catch (error) {
+      if (node) {
+        node.port.onmessage = null;
+        node.onprocessorerror = null;
+        try {
+          node.disconnect();
+        } catch {
+          // The graph may already have been disconnected by dispose().
+        }
+      }
+      if (master) {
+        try {
+          master.disconnect();
+        } catch {
+          // The graph may already have been disconnected by dispose().
+        }
+      }
+      if (this.node === node) this.node = null;
+      if (this.master === master) this.master = null;
+      this.ready = false;
+      throw error;
     } finally {
       if (this.rejectPendingInitialization === cancelInitialization) {
         this.rejectPendingInitialization = null;
