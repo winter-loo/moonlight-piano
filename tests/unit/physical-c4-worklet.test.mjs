@@ -226,3 +226,76 @@ test("disposing during startup rejects the pending start and ignores a late read
   assert.equal(engine.snapshot().state, "disposed");
   assert.equal(engine.snapshot().ready, false);
 });
+
+
+test("disposing while WASM fetch is pending cancels startup before a worklet node is created", async (t) => {
+  const { PhysicalC4WorkletEngine } = await import("../../lib/audio/physical-c4-worklet-engine.ts");
+
+  const originalNode = globalThis.AudioWorkletNode;
+  const originalFetch = globalThis.fetch;
+  let nodeCount = 0;
+
+  class FakeAudioWorkletNode {
+    constructor() {
+      nodeCount += 1;
+    }
+  }
+
+  let resolveFetch;
+  const pendingFetch = new Promise((resolve) => {
+    resolveFetch = resolve;
+  });
+
+  const context = {
+    state: "running",
+    sampleRate: 48_000,
+    currentTime: 1,
+    baseLatency: 0.01,
+    outputLatency: 0.02,
+    destination: {},
+    audioWorklet: {
+      async addModule() {
+        throw new Error("addModule must not run after disposal");
+      },
+    },
+    createGain() {
+      throw new Error("createGain must not run after disposal");
+    },
+    async resume() {},
+    async suspend() {},
+    async close() {
+      this.state = "closed";
+    },
+  };
+
+  globalThis.AudioWorkletNode = FakeAudioWorkletNode;
+  globalThis.fetch = () => pendingFetch;
+
+  t.after(() => {
+    if (originalNode === undefined) delete globalThis.AudioWorkletNode;
+    else globalThis.AudioWorkletNode = originalNode;
+    globalThis.fetch = originalFetch;
+  });
+
+  const engine = new PhysicalC4WorkletEngine({ context, ownsContext: false });
+  const started = engine.start();
+
+  await new Promise((resolve) => setImmediate(resolve));
+  await engine.dispose();
+
+  await assert.rejects(started, /disposed during startup/);
+  assert.equal(nodeCount, 0);
+  assert.equal(engine.snapshot().state, "disposed");
+
+  resolveFetch({
+    ok: true,
+    status: 200,
+    async arrayBuffer() {
+      return new ArrayBuffer(8);
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(nodeCount, 0);
+  assert.equal(engine.snapshot().state, "disposed");
+});
