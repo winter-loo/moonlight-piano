@@ -111,11 +111,21 @@ test("physical engine start waits for the AudioWorklet ready message and rejects
   assert.equal(resolved, false);
   assert.equal(engine.snapshot().ready, false);
 
+  let repeatedResolved = false;
+  const repeatedStart = engine.start().then(() => {
+    repeatedResolved = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(repeatedResolved, false);
+  assert.equal(FakeAudioWorkletNode.instances.length, 1);
+
   FakeAudioWorkletNode.instances[0].port.onmessage({
     data: { type: "ready", memoryBytes: 65_536 },
   });
-  await started;
+  await Promise.all([started, repeatedStart]);
   assert.equal(resolved, true);
+  assert.equal(repeatedResolved, true);
   assert.equal(engine.snapshot().ready, true);
   assert.equal(engine.snapshot().parameters.wasmMemoryBytes, 65_536);
 
