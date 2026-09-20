@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -287,22 +287,64 @@ export async function loadAndValidateRegistry(options = {}) {
   return validateRegistryDocument(registry, policy, splits, holdout, clearances);
 }
 
-export async function ingestSource({ sourceId, outputRoot, fetchImpl = fetch }) {
-  const validated = await loadAndValidateRegistry();
+export async function ingestSource({ sourceId, outputRoot, fetchImpl = fetch, registryOptions = {} }) {
+  const validated = await loadAndValidateRegistry(registryOptions);
   const source = validated.registry.sources.find((candidate) => candidate.id === sourceId);
   if (!source) throw new RegistryError(`unknown source: ${sourceId}`, "SOURCE_NOT_FOUND");
-  const rawDirectory = path.join(outputRoot, "raw", source.id);
-  const receiptDirectory = path.join(outputRoot, "receipts");
-  await mkdir(rawDirectory, { recursive: true });
-  await mkdir(receiptDirectory, { recursive: true });
+  if (source.status === "blocked") throw new RegistryError(`blocked source cannot be ingested: ${sourceId}`, "SOURCE_BLOCKED");
+  return ingestValidatedSource({ source, outputRoot, fetchImpl });
+}
+
+export async function ingestAllSources({ outputRoot, fetchImpl = fetch, registryOptions = {} }) {
+  const validated = await loadAndValidateRegistry(registryOptions);
+  const results = [];
+  for (const source of validated.registry.sources) {
+    if (source.status === "blocked") continue;
+    results.push(await ingestValidatedSource({ source, outputRoot, fetchImpl }));
+  }
+  return results;
+}
+
+async function ingestValidatedSource({ source, outputRoot, fetchImpl }) {
+  await mkdir(outputRoot, { recursive: true });
+  const outputDirectory = await realpath(outputRoot);
+  const rawDirectory = path.join(outputDirectory, "raw", source.id);
+  const receiptDirectory = path.join(outputDirectory, "receipts");
+  for (const directory of [rawDirectory, receiptDirectory]) {
+    await mkdir(directory, { recursive: true });
+    if (await realpath(directory) !== directory) {
+      throw new RegistryError("ingestion directories must not traverse symlinks", "UNSAFE_ASSET_PATH");
+    }
+  }
+
   const receipts = [];
   for (const asset of source.assets) {
-    const response = await fetchImpl(asset.url, { redirect: "follow" });
-    if (!response.ok) throw new RegistryError(`${source.id}:${asset.id} download failed with HTTP ${response.status}`, "DOWNLOAD_FAILED");
-    const buffer = Buffer.from(await response.arrayBuffer());
+    if (asset.expectedBytes > 256 * 1024 * 1024) {
+      throw new RegistryError("asset exceeds the 256 MiB ingestion budget", "ASSET_TOO_LARGE");
+    }
+    const response = await fetchImpl(asset.url, {
+      redirect: "error",
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!response.ok) {
+      throw new RegistryError(`${source.id}:${asset.id} download failed with HTTP ${response.status}`, "DOWNLOAD_FAILED");
+    }
+    if (!response.body) throw new RegistryError("download has no body", "DOWNLOAD_FAILED");
+
+    const chunks = [];
+    let byteCount = 0;
+    for await (const chunk of response.body) {
+      byteCount += chunk.length;
+      if (byteCount > asset.expectedBytes) {
+        throw new RegistryError("download exceeds registered byte count", "INTEGRITY_MISMATCH");
+      }
+      chunks.push(chunk);
+    }
+
+    const buffer = Buffer.concat(chunks, byteCount);
     verifyAssetBuffer(source.id, asset, buffer);
     const localPath = confinedPath(rawDirectory, asset.fileName);
-    await writeFile(localPath, buffer);
+    await writeOrVerifyFile(localPath, buffer);
     receipts.push({
       assetId: asset.id,
       role: asset.role,
@@ -313,6 +355,7 @@ export async function ingestSource({ sourceId, outputRoot, fetchImpl = fetch }) 
       localPath: path.relative(ROOT, localPath),
     });
   }
+
   const receipt = {
     schemaVersion: 1,
     sourceId: source.id,
@@ -323,19 +366,9 @@ export async function ingestSource({ sourceId, outputRoot, fetchImpl = fetch }) 
     rawCommitPolicy: "never-commit",
     assets: receipts,
   };
-  const receiptPath = path.join(receiptDirectory, `${source.id}.json`);
-  await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+  const receiptPath = confinedPath(receiptDirectory, `${source.id}.json`);
+  await writeOrVerifyFile(receiptPath, Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`));
   return { receipt, receiptPath };
-}
-
-export async function ingestAllSources({ outputRoot, fetchImpl = fetch }) {
-  const validated = await loadAndValidateRegistry();
-  const results = [];
-  for (const source of validated.registry.sources) {
-    if (source.status === "blocked") continue;
-    results.push(await ingestSource({ sourceId: source.id, outputRoot, fetchImpl }));
-  }
-  return results;
 }
 
 export function verifyAssetBuffer(sourceId, asset, buffer) {
@@ -394,8 +427,9 @@ export async function sealHoldoutManifest({
   return receipt;
 }
 
-export async function buildProvenanceReport({ receiptsDirectory }) {
-  const validated = await loadAndValidateRegistry();
+export async function buildProvenanceReport({ receiptsDirectory, requireAllReceipts = false, registryOptions = {} }) {
+  if (typeof requireAllReceipts !== "boolean") throw new RegistryError("requireAllReceipts must be boolean", "CLI_INVALID");
+  const validated = await loadAndValidateRegistry(registryOptions);
   const sources = [];
   for (const source of validated.registry.sources) {
     let receipt = null;
@@ -405,6 +439,9 @@ export async function buildProvenanceReport({ receiptsDirectory }) {
       if (error?.code !== "ENOENT") throw error;
     }
     if (receipt) validateReceipt(source, receipt);
+    else if (requireAllReceipts && source.status !== "blocked") {
+      throw new RegistryError(`${source.id}: required ingestion receipt is missing`, "RECEIPT_MISSING");
+    }
     sources.push({
       id: source.id,
       title: source.title,
@@ -502,6 +539,21 @@ export function provenanceReportMarkdown(report) {
     lines.push("");
   }
   return `${lines.join("\n")}\n`;
+}
+
+async function writeOrVerifyFile(filePath, bytes) {
+  try {
+    await writeFile(filePath, bytes, { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    const info = await lstat(filePath);
+    if (!info.isFile() || info.isSymbolicLink() || info.size !== bytes.length) {
+      throw new RegistryError("existing ingestion file is unsafe or changed", "INTEGRITY_MISMATCH");
+    }
+    if (!(await readFile(filePath)).equals(bytes)) {
+      throw new RegistryError("existing ingestion bytes changed", "INTEGRITY_MISMATCH");
+    }
+  }
 }
 
 function confinedPath(directory, fileName) {
@@ -613,7 +665,9 @@ async function cli() {
   if (command === "report") {
     const outputBase = path.resolve(options.output ?? path.join(ROOT, "work/acoustic-data/provenance-report"));
     const receiptsDirectory = path.resolve(options.receipts ?? path.join(ROOT, "work/acoustic-data/receipts"));
-    const report = await buildProvenanceReport({ receiptsDirectory });
+    const requireAll = options["require-all"] === undefined ? false : options["require-all"] === "true";
+    if (options["require-all"] !== undefined && !["true", "false"].includes(options["require-all"])) throw new RegistryError("--require-all must be true or false", "CLI_INVALID");
+    const report = await buildProvenanceReport({ receiptsDirectory, requireAllReceipts: requireAll });
     await mkdir(path.dirname(outputBase), { recursive: true });
     await writeFile(`${outputBase}.json`, `${JSON.stringify(report, null, 2)}\n`);
     await writeFile(`${outputBase}.md`, provenanceReportMarkdown(report));
@@ -631,7 +685,7 @@ async function cli() {
       outputPath: options.output,
       custodian: options.custodian,
     });
-    console.log(`sealed holdout commitment ${receipt.manifestSha256}`);
+    console.log(`sealed holdout commitment ${receipt.manifestCommitmentSha256}`);
     return;
   }
   throw new RegistryError("usage: acoustic-data-registry.mjs <validate|ingest|ingest-all|report|seal-holdout> [options]", "CLI_INVALID");

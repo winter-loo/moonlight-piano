@@ -17,7 +17,7 @@
     "audio:wasm": "node scripts/build-web-audio-wasm.mjs",
     "acoustic:validate": "node scripts/acoustic-data-registry.mjs validate",
     "acoustic:ingest:salamander": "node scripts/acoustic-data-registry.mjs ingest --source salamander-tonejs-c4 --output work/acoustic-data",
-    "acoustic:report": "node scripts/acoustic-data-registry.mjs report --receipts work/acoustic-data/receipts --output work/acoustic-data/provenance-report",
+    "acoustic:report": "node scripts/acoustic-data-registry.mjs report --receipts work/acoustic-data/receipts --output work/acoustic-data/provenance-report --require-all true",
     "acoustic:ingest:all": "node scripts/acoustic-data-registry.mjs ingest-all --output work/acoustic-data"
   },
   "dependencies": {
