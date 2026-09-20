@@ -1,0 +1,169 @@
+{
+  "cases": [
+    {
+      "image": "beamed-note-groups.png",
+      "sha256": "ef9c507538b6cacca0587203bed2eefdc2d357b1023f7e80fc6c6163ca007a6b",
+      "judgment_line_x": 407,
+      "events": [
+        ["note", "F4", 0.5],
+        ["note", "F4", 0.5],
+        ["note", "F4", 0.5],
+        ["note", "C4", 0.5],
+        ["note", "D4", 0.5],
+        ["note", "D4", 0.5],
+        ["note", "C4", 0.5],
+        ["note", "C4", 0.5],
+        ["note", "F4", 0.5],
+        ["note", "F4", 0.5],
+        ["note", "G4", 0.5],
+        ["note", "G4", 0.5],
+        ["note", "A4", 1.0],
+        ["note", "F4", 1.0]
+      ]
+    },
+    {
+      "image": "rests-and-edge-note.png",
+      "sha256": "d920c55dc2825d883641427bcc3a3096bcc4d793e21509fa7e1f21f3fcb43170",
+      "judgment_line_x": 407,
+      "events": [
+        ["note", "F4", 1.0],
+        ["rest", null, 1.0],
+        ["rest", null, 2.0],
+        ["rest", null, 2.0],
+        ["rest", null, 1.0],
+        ["rest", null, 0.5],
+        ["note", "C4", null]
+      ]
+    },
+    {
+      "image": "low-notes-and-rests.png",
+      "sha256": "fa007096796423ad7879ebb97affb7e4fa177adeb7956bca2f5cdc1886da56c6",
+      "judgment_line_x": 351,
+      "events": [
+        ["note", "E4", 2.0],
+        ["rest", null, 1.0],
+        ["note", "D4", 0.5],
+        ["note", "C4", 0.5],
+        ["note", "A3", 0.5],
+        ["note", "E4", 0.5],
+        ["rest", null, 0.5],
+        ["note", "D4", 0.5],
+        ["rest", null, 0.5],
+        ["note", "C4", 0.5],
+        ["note", "B3", 0.5],
+        ["note", "B3", 0.5]
+      ]
+    },
+    {
+      "image": "quarter-half-whole-rests.png",
+      "sha256": "c5317d92b0a6bff056285f555a6a644fc8e39ee274ce2de7040d0dd8cf25e404",
+      "judgment_line_x": 407,
+      "events": [
+        ["note", "F4", 1.0],
+        ["rest", null, 1.0],
+        ["rest", null, 2.0],
+        ["rest", null, 4.0]
+      ]
+    },
+    {
+      "image": "dotted-quarter-and-beamed-notes.png",
+      "sha256": "9a54b8f6295a5d930ed698f1b780f04a6716ffc2eda7c055aa2abcf622dbdcb4",
+      "judgment_line_x": 407,
+      "events": [
+        ["note", "F4", 1.5],
+        ["note", "G4", 0.5],
+        ["note", "A4", 1.0],
+        ["note", "A4", 1.0],
+        ["note", "G4", 0.5],
+        ["note", "F4", 0.5],
+        ["note", "G4", 0.5],
+        ["note", "A4", 0.5],
+        ["note", "F4", 1.0],
+        ["note", "C4", 1.0]
+      ]
+    },
+    {
+      "image": "bidirectional-stems-and-steep-beams.png",
+      "sha256": "3a53afa1a956127121e7b20a84c5060e984e18a37f866bded2a9ccb6e9b94916",
+      "judgment_line_x": 407,
+      "events": [
+        ["note", "G4", 0.5],
+        ["note", "F4", 0.5],
+        ["note", "G4", 0.5],
+        ["note", "A4", 0.5],
+        ["note", "F4", 2.0],
+        ["note", "F4", 0.5],
+        ["note", "G4", 0.5],
+        ["note", "A4", 0.5],
+        ["note", "Bb4", 0.5],
+        ["note", "C5", 0.5],
+        ["note", "C5", 0.5],
+        ["note", "C5", 1.0]
+      ]
+    },
+    {
+      "image": "downstem-flag-touching-notehead.png",
+      "sha256": "bf91825d54f0c55744419bb9b6b9527f77865dc369deb19134bf63c68fca01a6",
+      "judgment_line_x": 351,
+      "events": [
+        ["note", "A4", 1.5],
+        ["note", "B4", 0.5],
+        ["note", "A4", 1.0],
+        ["note", "G4", 2.0],
+        ["note", "E4", 1.0],
+        ["note", "C4", 1.5],
+        ["note", "D4", 0.5]
+      ]
+    },
+    {
+      "image": "two-flats-occluded-downstem.png",
+      "sha256": "d320d11f2f32dc0bcaf16b5ba578b982905a6a76b53f23364899b97f560743f3",
+      "judgment_line_x": 444,
+      "events": [
+        ["note", "Eb5", 1.0],
+        ["note", "D5", 1.0],
+        ["note", "C5", 1.0],
+        ["note", "F5", 1.0],
+        ["rest", null, 1.0],
+        ["note", "D5", 1.0],
+        ["note", "C5", 1.0],
+        ["note", "Bb4", 1.0]
+      ]
+    },
+    {
+      "image": "single-flat-mixed-rhythm-and-edge-note.png",
+      "sha256": "c82825db9580bb5b3a2d02b322261ff85c07587568f4068a987a6ada09e1bfd8",
+      "judgment_line_x": 412,
+      "known_duration_beats": 8.0,
+      "events": [
+        ["note", "C5", 0.5],
+        ["note", "A4", 1.0],
+        ["rest", null, 0.5],
+        ["note", "A4", 0.5],
+        ["rest", null, 0.5],
+        ["note", "A4", 0.5],
+        ["rest", null, 1.0],
+        ["note", "C5", 0.5],
+        ["note", "Bb4", 0.5],
+        ["rest", null, 0.5],
+        ["note", "A4", 0.5],
+        ["rest", null, 0.5],
+        ["note", "D5", 0.5],
+        ["note", "C5", 0.5],
+        ["note", "G4", null]
+      ],
+      "note_features": [
+        ["C5", "down", false, true, false, false],
+        ["A4", "down", false, false, false, false],
+        ["A4", "up", false, true, false, false],
+        ["A4", "up", false, true, false, false],
+        ["C5", "down", true, false, false, false],
+        ["Bb4", "down", true, false, false, false],
+        ["A4", "up", false, true, false, false],
+        ["D5", "down", false, true, false, false],
+        ["C5", "up", false, true, false, false],
+        ["G4", null, false, false, false, true]
+      ]
+    }
+  ]
+}
