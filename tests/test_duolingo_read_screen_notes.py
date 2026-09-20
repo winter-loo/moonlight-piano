@@ -6,6 +6,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -168,6 +169,28 @@ class OccludedStemAndKeySignatureTest(unittest.TestCase):
         self.assertEqual("Eb5", notes[0]["pitch"])
         self.assertEqual("down", notes[0]["stem_direction"])
         self.assertEqual("Bb4", notes[-1]["pitch"])
+
+
+class SharedAnalysisContextTest(unittest.TestCase):
+    def test_reuses_frame_geometry_for_notes_and_rests(self):
+        image = Image.open(
+            FIXTURE_DIR / "single-flat-mixed-rhythm-and-edge-note.png"
+        ).convert("RGB")
+
+        with (
+            mock.patch.object(
+                reader, "find_staff_lines", wraps=reader.find_staff_lines
+            ) as find_staff_lines,
+            mock.patch.object(
+                reader, "locate_judgment_line", wraps=reader.locate_judgment_line
+            ) as locate_judgment_line,
+        ):
+            context = reader.build_analysis_context(image)
+            reader.analyze_screen_notes(context)
+            reader.analyze_screen_rests(context)
+
+        self.assertEqual(1, find_staff_lines.call_count)
+        self.assertEqual(1, locate_judgment_line.call_count)
 
 
 class RealScreenRegressionTest(unittest.TestCase):

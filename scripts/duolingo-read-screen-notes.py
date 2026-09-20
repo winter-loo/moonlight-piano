@@ -10,6 +10,7 @@ a structured ledger with pitch, physical key mapping, and relative timing (hold 
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import io
 import json
 import subprocess
@@ -66,6 +67,38 @@ KEY_DISPLAY_LABELS = {
     "E5": "E↑",
     "Bb4": "Bb",
 }
+
+
+@dataclass(frozen=True)
+class ScreenAnalysisContext:
+    """Frame-wide data shared by note and rest recognition."""
+
+    image: Image.Image
+    arr: np.ndarray
+    luminance: np.ndarray
+    staff_lines: tuple[int, int, int, int, int]
+    judgment_line_x: int
+
+
+def build_analysis_context(img: Image.Image) -> ScreenAnalysisContext:
+    """Compute invariant frame geometry once for all recognizers."""
+    image = img.convert("RGB")
+    arr = np.asarray(image)
+    return ScreenAnalysisContext(
+        image=image,
+        arr=arr,
+        luminance=arr.mean(axis=2),
+        staff_lines=find_staff_lines(arr),
+        judgment_line_x=locate_judgment_line(arr),
+    )
+
+
+def ensure_analysis_context(
+    source: Image.Image | ScreenAnalysisContext,
+) -> ScreenAnalysisContext:
+    if isinstance(source, ScreenAnalysisContext):
+        return source
+    return build_analysis_context(source)
 
 
 def capture_adb_screenshot(serial: str | None = None) -> Image.Image:
@@ -367,6 +400,7 @@ def detect_judgment_occluded_stem(
     center_x: float,
     center_y: float,
     judgment_line_x: int,
+    luminance: np.ndarray | None = None,
 ) -> dict | None:
     """Recover a stem whose dark pixels are recolored by the judgment line.
 
@@ -379,7 +413,8 @@ def detect_judgment_occluded_stem(
     if abs(cx - judgment_line_x) > 36:
         return None
 
-    luminance = arr.mean(axis=2)
+    if luminance is None:
+        luminance = arr.mean(axis=2)
     candidates: list[dict] = []
     searches = (
         ("up", max(0, cy - 170), max(0, cy - 12), max(0, cx + 3), min(w, cx + 30)),
@@ -469,15 +504,16 @@ def find_staff_right_edge(arr: np.ndarray, staff_ys: list[int]) -> int:
 
 
 def analyze_screen_rests(
-    img: Image.Image,
+    img: Image.Image | ScreenAnalysisContext,
     min_x: int | None = None,
     max_x: int = 1520,
 ) -> list[dict]:
     """Detect Duolingo rest glyphs at and to the right of the judgment line."""
-    arr = np.array(img.convert("RGB"))
-    line_5_y, line_4_y, line_3_y, _line_2_y, line_1_y = find_staff_lines(arr)
+    context = ensure_analysis_context(img)
+    arr = context.arr
+    line_5_y, line_4_y, line_3_y, _line_2_y, line_1_y = context.staff_lines
     if min_x is None:
-        min_x = max(0, locate_judgment_line(arr) - 10)
+        min_x = max(0, context.judgment_line_x - 10)
 
     # Duolingo draws rests darker than the staff.  Label the complete screen
     # so low noteheads and keyboard keys retain their full component geometry
@@ -552,17 +588,18 @@ def analyze_screen_rests(
 
 
 def analyze_screen_notes(
-    img: Image.Image,
+    img: Image.Image | ScreenAnalysisContext,
     min_x: int | None = None,
     max_x: int = 1520,
     has_flat_key_sig: bool = False,
     annotated_output_path: Path | None = None,
 ) -> list[dict]:
-    arr = np.array(img.convert("RGB"))
+    context = ensure_analysis_context(img)
+    arr = context.arr
     h, w, _ = arr.shape
 
     # Detect judgment line if min_x is not explicitly provided
-    judgment_line_x = locate_judgment_line(arr)
+    judgment_line_x = context.judgment_line_x
     if min_x is None:
         # Start right at the judgment line (with a slight margin to capture notehead on/at the line)
         min_x = max(0, judgment_line_x - 10)
@@ -580,7 +617,7 @@ def analyze_screen_notes(
         )
 
     # 1. Staff lines: line 5 (top) to line 1 (bottom)
-    line_5_y, line_4_y, line_3_y, line_2_y, line_1_y = find_staff_lines(arr)
+    line_5_y, line_4_y, line_3_y, line_2_y, line_1_y = context.staff_lines
     step_y = (line_1_y - line_5_y) / 4.0
     staff_ys = [line_5_y, line_4_y, line_3_y, line_2_y, line_1_y]
     staff_right_x = find_staff_right_edge(arr, staff_ys)
@@ -612,8 +649,10 @@ def analyze_screen_notes(
     disk = (x_grid**2 + y_grid**2 <= r**2).astype(float)
     ring = ((x_grid**2 + y_grid**2 <= r**2) & (x_grid**2 + y_grid**2 >= (r-5)**2)).astype(float)
 
-    corr_disk = scipy.signal.correlate2d(dark, disk, mode="same") / disk.sum()
-    corr_ring = scipy.signal.correlate2d(dark, ring, mode="same") / ring.sum()
+    # The circular templates are center-symmetric, so FFT convolution is
+    # numerically equivalent to correlation and substantially faster here.
+    corr_disk = scipy.signal.fftconvolve(dark, disk, mode="same") / disk.sum()
+    corr_ring = scipy.signal.fftconvolve(dark, ring, mode="same") / ring.sum()
     score = np.maximum(corr_disk, corr_ring / 0.6)
 
     # Restrict the peak profile to narrow bands around playable staff steps.
@@ -630,13 +669,15 @@ def analyze_screen_notes(
     pitch_argmax = score[pitch_rows, :].argmax(axis=0)
     col_best_y = np.asarray(pitch_rows)[pitch_argmax] + search_top
 
-    peaks_x, _ = scipy.signal.find_peaks(pitch_score[min_x:max_x], height=0.75, distance=45)
+    peaks_x, _ = scipy.signal.find_peaks(
+        pitch_score[min_x:max_x], height=0.75, distance=45
+    )
     raw_candidate_xs = [min_x + int(px) for px in peaks_x]
     candidate_xs = suppress_close_candidates(raw_candidate_xs, pitch_score)
 
     # 3. For each notehead X, extract true circular blob center
     notes = []
-    vis = img.copy().convert("RGB") if annotated_output_path else None
+    vis = context.image.copy() if annotated_output_path else None
     draw = ImageDraw.Draw(vis) if vis else None
 
     if draw:
@@ -718,7 +759,11 @@ def analyze_screen_notes(
         stem
         if stem is not None
         else detect_judgment_occluded_stem(
-            arr, note["x"], note["y"], judgment_line_x
+            arr,
+            note["x"],
+            note["y"],
+            judgment_line_x,
+            luminance=context.luminance,
         )
         for note, stem in zip(notes, stems)
     ]
@@ -869,11 +914,12 @@ def main():
     else:
         img = capture_adb_screenshot(args.serial)
 
+    context = build_analysis_context(img)
     notes = analyze_screen_notes(
-        img,
+        context,
         annotated_output_path=args.out_annotated,
     )
-    rests = analyze_screen_rests(img)
+    rests = analyze_screen_rests(context)
     events = sorted([*notes, *rests], key=lambda event: event["x"])
     if args.out_annotated:
         annotate_rests(args.out_annotated, rests)
