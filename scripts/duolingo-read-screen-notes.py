@@ -10,63 +10,42 @@ a structured ledger with pitch, physical key mapping, and relative timing (hold 
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 import io
 import json
+import queue
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Callable, TextIO
 
 import numpy as np
 from PIL import Image, ImageDraw
 import scipy.ndimage
 import scipy.signal
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+from duolingo_keyboard_detect import (  # noqa: E402
+    KeyboardLayout,
+    KeyboardNotDetectedError,
+    detect_keyboard,
+)
 
-KEY_COORDINATES = {
-    # Low octave (arrow down): y = 600
-    "A3": (294, 600),
-    "B3": (415, 600),
-    # Middle octave: y = 600
-    "C4": (536, 600),
-    "D4": (670, 600),
-    "E4": (794, 600),
-    "F4": (915, 600),
-    "G4": (1049, 600),
-    "A4": (1173, 600),
-    "B4": (1294, 600),
-    "C5": (1415, 600),
-    # High octave (arrow up)
-    "D5": (1255, 600),
-    "E5": (1388, 600),
-    # Black keys: y = 475
-    "Bb3": (355, 475),
-    "Db4": (245, 475),
-    "Eb4": (378, 475),
-    "Gb4": (660, 475),
-    "Ab4": (793, 475),
-    "Bb4": (926, 475),
-    "Db5": (1208, 475),
-    "Eb5": (1341, 475),
-}
 
-KEY_DISPLAY_LABELS = {
-    "A3": "A↓",
-    "B3": "B↓",
-    "Bb3": "Bb↓",
-    "C4": "C",
-    "D4": "D",
-    "E4": "E",
-    "F4": "F",
-    "G4": "G",
-    "A4": "A",
-    "B4": "B",
-    "C5": "C↑",
-    "D5": "D↑",
-    "E5": "E↑",
-    "Bb4": "Bb",
-}
+# Key targets are no longer hard-coded.  Every lesson re-anchors the pitches on
+# the same physical grid, so a table measured on one lesson silently taps the
+# wrong key on the next; see duolingo_keyboard_detect.detect_keyboard.
+
+DEFAULT_HUMAN_READABLE_OUTPUT = Path("duolingo-screen-notes.txt")
+
+
+class ScoreNotVisibleError(RuntimeError):
+    """Raised when the current frame is not a Duolingo staff screen."""
 
 
 @dataclass(frozen=True)
@@ -78,6 +57,16 @@ class ScreenAnalysisContext:
     luminance: np.ndarray
     staff_lines: tuple[int, int, int, int, int]
     judgment_line_x: int
+    # Detection costs ~40ms, and capture loops build a context for every frame
+    # while only the note recognizer ever needs a key target, so resolve it on
+    # first use instead of per frame.
+    _keyboard_cache: list = field(default_factory=list, repr=False, compare=False)
+
+    @property
+    def keyboard(self) -> KeyboardLayout | None:
+        if not self._keyboard_cache:
+            self._keyboard_cache.append(detect_frame_keyboard(self.arr))
+        return self._keyboard_cache[0]
 
 
 def build_analysis_context(img: Image.Image) -> ScreenAnalysisContext:
@@ -93,6 +82,14 @@ def build_analysis_context(img: Image.Image) -> ScreenAnalysisContext:
     )
 
 
+def detect_frame_keyboard(arr: np.ndarray) -> KeyboardLayout | None:
+    """Read this frame's keyboard, tolerating frames that do not show one."""
+    try:
+        return detect_keyboard(arr)
+    except KeyboardNotDetectedError:
+        return None
+
+
 def ensure_analysis_context(
     source: Image.Image | ScreenAnalysisContext,
 ) -> ScreenAnalysisContext:
@@ -101,10 +98,12 @@ def ensure_analysis_context(
     return build_analysis_context(source)
 
 
-def capture_adb_screenshot(serial: str | None = None) -> Image.Image:
+def resolve_adb_serial(serial: str | None = None, adb: str = "adb") -> str | None:
+    """Resolve the preferred OPPO serial while excluding the projector."""
     if not serial:
-        # Check connected devices
-        out = subprocess.run(["adb", "devices"], stdout=subprocess.PIPE, text=True, check=True).stdout
+        out = subprocess.run(
+            [adb, "devices"], stdout=subprocess.PIPE, text=True, check=True
+        ).stdout
         devices = [line.split()[0] for line in out.strip().splitlines()[1:] if "\tdevice" in line]
         if len(devices) == 1:
             serial = devices[0]
@@ -112,6 +111,36 @@ def capture_adb_screenshot(serial: str | None = None) -> Image.Image:
             # Prefer OPPO port or tls connect if available
             oppo_devs = [d for d in devices if d != "192.168.10.100:5555"]
             serial = oppo_devs[0] if oppo_devs else devices[0]
+    return serial
+
+
+def require_adb_device(serial: str, adb: str = "adb") -> None:
+    """Fail clearly unless the exact requested ADB device is online."""
+    result = subprocess.run(
+        [adb, "devices"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    )
+    device_states = {}
+    for line in result.stdout.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) >= 2:
+            device_states[fields[0]] = fields[1]
+
+    state = device_states.get(serial)
+    if state != "device":
+        state_description = state if state is not None else "missing"
+        raise RuntimeError(
+            f"ADB device {serial!r} is not connected "
+            f"(state: {state_description}); reconnect that device before "
+            "starting the screen reader"
+        )
+
+
+def capture_adb_screenshot(serial: str | None = None) -> Image.Image:
+    serial = resolve_adb_serial(serial)
 
     cmd = ["adb"]
     if serial:
@@ -119,6 +148,202 @@ def capture_adb_screenshot(serial: str | None = None) -> Image.Image:
     cmd.extend(["exec-out", "screencap", "-p"])
     raw = subprocess.run(cmd, stdout=subprocess.PIPE, check=True).stdout
     return Image.open(io.BytesIO(raw)).convert("RGB")
+
+
+class H264FramePump:
+    """Continuously decode the OPPO hardware H.264 stream and retain one frame."""
+
+    def __init__(
+        self,
+        adb: str,
+        serial: str,
+        *,
+        ffmpeg: str = "ffmpeg",
+        width: int = 1612,
+        height: int = 720,
+        bitrate: int = 12_000_000,
+        encoder_fps: int = 60,
+        output_fps: int = 60,
+        warmup_frames: int = 60,
+    ) -> None:
+        self._adb = adb
+        self._serial = serial
+        self._ffmpeg = ffmpeg
+        self._width = width
+        self._height = height
+        self._bitrate = bitrate
+        self._encoder_fps = encoder_fps
+        self._output_fps = output_fps
+        self._warmup_frames = warmup_frames
+        self._frame_size = width * height * 3
+        self._encoder: subprocess.Popen[bytes] | None = None
+        self._decoder: subprocess.Popen[bytes] | None = None
+        self._reader_thread: threading.Thread | None = None
+        self._stderr_threads: list[threading.Thread] = []
+        self._condition = threading.Condition()
+        self._latest: bytes | None = None
+        self._sequence = 0
+        self._latest_arrival_ns = 0
+        self._stable_intervals = 0
+        self._error: str | None = None
+        self._stopping = False
+        self._stderr_tail: list[str] = []
+
+    @property
+    def sequence(self) -> int:
+        with self._condition:
+            return self._sequence
+
+    def start(self, timeout: float = 4.0) -> None:
+        require_adb_device(self._serial, self._adb)
+        remote = (
+            "CLASSPATH=/data/local/tmp/codex-screen-encoder.jar "
+            "app_process /system/bin CodexScreenEncoder "
+            f"{self._width} {self._height} {self._bitrate} "
+            f"{self._encoder_fps} 86400 0 /dev/null"
+        )
+        self._encoder = subprocess.Popen(
+            [self._adb, "-s", self._serial, "exec-out", "sh", "-c", remote],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert self._encoder.stdout is not None
+        self._decoder = subprocess.Popen(
+            [
+                self._ffmpeg,
+                "-v",
+                "error",
+                "-flags",
+                "low_delay",
+                "-f",
+                "h264",
+                "-i",
+                "pipe:0",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "pipe:1",
+            ],
+            stdin=self._encoder.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self._encoder.stdout.close()
+        for name, process in (("encoder", self._encoder), ("decoder", self._decoder)):
+            assert process.stderr is not None
+            thread = threading.Thread(
+                target=self._drain_stderr,
+                args=(name, process.stderr),
+                daemon=True,
+            )
+            thread.start()
+            self._stderr_threads.append(thread)
+        self._reader_thread = threading.Thread(target=self._read_frames, daemon=True)
+        self._reader_thread.start()
+        self._wait_until_ready(timeout)
+
+    def _wait_until_ready(self, timeout: float) -> None:
+        """Wait until startup backlog is drained and output is real-time."""
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while (
+                self._sequence < self._warmup_frames
+                or self._stable_intervals < 3
+            ):
+                if self._error is not None:
+                    raise RuntimeError(self._error)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("H.264 stream did not reach real-time cadence")
+                self._condition.wait(remaining)
+
+    def _drain_stderr(self, name: str, stream) -> None:
+        for raw_line in iter(stream.readline, b""):
+            line = raw_line.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            with self._condition:
+                self._stderr_tail.append(f"{name}: {line}")
+                self._stderr_tail = self._stderr_tail[-20:]
+
+    def _read_frames(self) -> None:
+        assert self._decoder is not None and self._decoder.stdout is not None
+        try:
+            while True:
+                frame = bytearray()
+                while len(frame) < self._frame_size:
+                    block = self._decoder.stdout.read(self._frame_size - len(frame))
+                    if not block:
+                        raise EOFError("H.264 decoder stream ended")
+                    frame.extend(block)
+                arrival_ns = time.monotonic_ns()
+                with self._condition:
+                    if self._latest_arrival_ns:
+                        interval_ns = arrival_ns - self._latest_arrival_ns
+                        minimum_live_interval_ns = int(
+                            0.45 * 1_000_000_000 / self._output_fps
+                        )
+                        self._stable_intervals = (
+                            self._stable_intervals + 1
+                            if interval_ns >= minimum_live_interval_ns
+                            else 0
+                        )
+                    self._latest_arrival_ns = arrival_ns
+                    self._latest = bytes(frame)
+                    self._sequence += 1
+                    self._condition.notify_all()
+        except Exception as exc:
+            with self._condition:
+                if not self._stopping:
+                    details = "; ".join(self._stderr_tail[-3:])
+                    self._error = f"{exc}{': ' + details if details else ''}"
+                self._condition.notify_all()
+
+    def wait_for_frame(
+        self,
+        *,
+        after_sequence: int,
+        timeout: float,
+    ) -> Image.Image:
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while self._latest is None or self._sequence <= after_sequence:
+                if self._error is not None:
+                    raise RuntimeError(self._error)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("H.264 stream produced no fresh frame")
+                self._condition.wait(remaining)
+            frame = self._latest
+        assert frame is not None
+        return Image.frombytes("RGB", (self._width, self._height), frame)
+
+    def stop(self) -> None:
+        with self._condition:
+            self._stopping = True
+            self._condition.notify_all()
+        for process in (self._decoder, self._encoder):
+            if process is not None and process.poll() is None:
+                process.terminate()
+        for process in (self._decoder, self._encoder):
+            if process is None:
+                continue
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=1.0)
+        for thread in self._stderr_threads:
+            thread.join(timeout=1.0)
+        for process in (self._decoder, self._encoder):
+            if process is None:
+                continue
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None and not stream.closed:
+                    stream.close()
 
 
 def find_staff_lines(arr: np.ndarray) -> tuple[int, int, int, int, int]:
@@ -582,6 +807,7 @@ def analyze_screen_rests(
             "delta_beats": duration_beats,
             "key_target": None,
             "key_label": "休",
+            "key_unmapped": False,
         })
 
     return sorted(rests, key=lambda rest: rest["x"])
@@ -843,8 +1069,15 @@ def analyze_screen_notes(
             english, chinese = note["duration_type"].rsplit(" (", 1)
             note["duration_type"] = f"Dotted {english} (附点{chinese}"
 
-        note["key_target"] = KEY_COORDINATES.get(note["pitch"])
-        note["key_label"] = KEY_DISPLAY_LABELS.get(note["pitch"], note["pitch"])
+        keyboard = context.keyboard
+        note["key_target"] = keyboard.target(note["pitch"]) if keyboard else None
+        note["key_label"] = (
+            keyboard.label(note["pitch"]) if keyboard else note["pitch"]
+        )
+        # Duolingo only prints a label on the keys this song uses, so a pitch
+        # with no key is a signal that recognition drifted -- surface it rather
+        # than tapping the nearest plausible coordinate.
+        note["key_unmapped"] = note["key_target"] is None
 
         if draw:
             cx, cy = note["x"], note["y"]
@@ -878,16 +1111,112 @@ def annotate_rests(path: Path, rests: list[dict]) -> None:
     vis.save(path)
 
 
+def chinese_duration_name(duration_type: str) -> str:
+    if "(" in duration_type and duration_type.endswith(")"):
+        return duration_type.rsplit("(", 1)[1][:-1]
+    return duration_type
+
+
+def format_human_readable_list(events: list[dict] | tuple[dict, ...]) -> str:
+    """Render recognition events as a numbered, human-readable list."""
+    lines: list[str] = []
+    note_count = 0
+    rest_count = 0
+    unknown_count = 0
+    known_beats = 0.0
+
+    for index, event in enumerate(events, 1):
+        duration = event["duration_beats"]
+        if duration is None:
+            unknown_count += 1
+        else:
+            known_beats += float(duration)
+
+        if event["event_type"] == "rest":
+            rest_count += 1
+            name = chinese_duration_name(event["duration_type"])
+            duration_label = "时值未知" if duration is None else f"{duration:g} 拍"
+            lines.append(f"{index}. {name} — {duration_label}")
+            continue
+
+        note_count += 1
+        pitch = (event["pitch"] or "?").replace("b", "♭").replace("#", "♯")
+        if duration is None:
+            lines.append(f"{index}. {pitch} — 时值未知")
+            continue
+        name = chinese_duration_name(event["duration_type"])
+        lines.append(f"{index}. {pitch} — {name} — {duration:g} 拍")
+
+    unknown_summary = f"，{unknown_count} 个时值未知" if unknown_count else ""
+    lines.extend(
+        [
+            "",
+            f"已知合计：{known_beats:g} 拍",
+            f"事件统计：{note_count} 个音符，{rest_count} 个休止符{unknown_summary}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+class AsyncHumanReadableWriter:
+    """Format and append human output away from the response path."""
+
+    def __init__(self, error_stream: TextIO | None = None) -> None:
+        self._error_stream = error_stream or sys.stderr
+        self._queue: queue.SimpleQueue[
+            tuple[Path, tuple[dict, ...]] | None
+        ] = queue.SimpleQueue()
+        self._thread: threading.Thread | None = None
+
+    def submit(self, path: Path, events: list[dict]) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        self._queue.put((path, tuple(events)))
+
+    def _run(self) -> None:
+        while True:
+            job = self._queue.get()
+            if job is None:
+                return
+            path, events = job
+            try:
+                rendered = format_human_readable_list(events)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                separator = "\n\n" if path.exists() and path.stat().st_size else ""
+                timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+                record = (
+                    f"{separator}记录时间：{timestamp}\n\n"
+                    f"{rendered}\n"
+                )
+                with path.open("a", encoding="utf-8") as stream:
+                    stream.write(record)
+            except Exception as exc:
+                print(
+                    f"human-readable output failed for {path}: {exc}",
+                    file=self._error_stream,
+                    flush=True,
+                )
+
+    def close(self) -> None:
+        if self._thread is None:
+            return
+        self._queue.put(None)
+        self._thread.join()
+        self._thread = None
+
+
 def print_markdown_table(events: list[dict], elapsed_ms: float) -> None:
     print(f"\n### 屏幕识别乐谱事件与相对时间结果 (耗时: {elapsed_ms:.1f} ms)")
     print("| 序号 | 类型 | 坐标 (X, Y) | 几何位置 | 音名 | 对应琴键坐标 | 键位标注 | 时值类型 | 按住拍数 (hold) | 相对间隔 (delta) |")
     print("| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
     for idx, event in enumerate(events, 1):
-        coord_str = (
-            f"({event['key_target'][0]}, {event['key_target'][1]})"
-            if event["key_target"]
-            else "—"
-        )
+        if event["key_target"]:
+            coord_str = f"({event['key_target'][0]}, {event['key_target'][1]})"
+        elif event.get("key_unmapped"):
+            coord_str = "**⚠ 未标注键**"
+        else:
+            coord_str = "—"
         pitch = event["pitch"] or "休止"
         event_label = "音符" if event["event_type"] == "note" else "休止符"
         hold = f"{event['hold_beats']} 拍" if event["hold_beats"] is not None else "未知"
@@ -899,42 +1228,444 @@ def print_markdown_table(events: list[dict], elapsed_ms: float) -> None:
         )
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Objective Duolingo Score Reader")
-    parser.add_argument("--image", type=Path, help="Input PNG image path (if omitted, capture from adb)")
-    parser.add_argument("--serial", type=str, default=None, help="ADB device serial")
-    parser.add_argument("--out-annotated", type=Path, help="Path to save annotated visual image")
-    parser.add_argument("--json", action="store_true", help="Output raw JSON instead of markdown table")
-    args = parser.parse_args()
-
-    t0 = time.perf_counter()
-
-    if args.image:
-        img = Image.open(args.image).convert("RGB")
-    else:
-        img = capture_adb_screenshot(args.serial)
-
+def analyze_image(
+    img: Image.Image,
+    *,
+    out_annotated: Path | None = None,
+    started_at: float | None = None,
+) -> dict:
+    """Analyze one already-loaded frame."""
+    if started_at is None:
+        started_at = time.perf_counter()
     context = build_analysis_context(img)
+    if context.staff_lines is None:
+        raise ScoreNotVisibleError("five-line staff is not visible")
     notes = analyze_screen_notes(
         context,
-        annotated_output_path=args.out_annotated,
+        annotated_output_path=out_annotated,
     )
     rests = analyze_screen_rests(context)
     events = sorted([*notes, *rests], key=lambda event: event["x"])
-    if args.out_annotated:
-        annotate_rests(args.out_annotated, rests)
+    if out_annotated is not None:
+        annotate_rests(out_annotated, rests)
 
-    t1 = time.perf_counter()
-    elapsed_ms = (t1 - t0) * 1000.0
+    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+    return {
+        "elapsed_ms": elapsed_ms,
+        "notes": notes,
+        "rests": rests,
+        "events": events,
+    }
+
+
+def analyze_request(
+    *,
+    image_path: Path | None = None,
+    serial: str | None = None,
+    out_annotated: Path | None = None,
+    started_at: float | None = None,
+) -> dict:
+    """Capture or load one frame and return its complete recognition result."""
+    if started_at is None:
+        started_at = time.perf_counter()
+    if image_path is not None:
+        with Image.open(image_path) as source:
+            img = source.convert("RGB")
+    else:
+        img = capture_adb_screenshot(serial)
+    return analyze_image(
+        img,
+        out_annotated=out_annotated,
+        started_at=started_at,
+    )
+
+
+def write_json_line(stream: TextIO, payload: dict) -> None:
+    stream.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    stream.write("\n")
+    stream.flush()
+
+
+def semantic_event_signature(events: list[dict]) -> tuple[tuple[object, ...], ...]:
+    """Return score meaning while deliberately ignoring scrolling geometry."""
+    return tuple(
+        (
+            event["event_type"],
+            event["pitch"],
+            event["duration_type"],
+            event["duration_beats"],
+        )
+        for event in events
+    )
+
+
+def watch_result_signature(result: dict) -> tuple[object, ...]:
+    """Distinguish a visible empty staff from a screen with no score."""
+    return (
+        result.get("screen_state", "score"),
+        semantic_event_signature(result["events"]),
+    )
+
+
+def watch_screen_changes(
+    output_stream: TextIO,
+    *,
+    default_serial: str | None = None,
+    frame_source: str = "auto",
+    stable_frames: int = 2,
+    poll_interval: float = 0.05,
+    frame_pump_factory: Callable[[str, str], H264FramePump] | None = None,
+    human_readable_out: Path | None = None,
+    human_writer: AsyncHumanReadableWriter | None = None,
+    max_updates: int | None = None,
+) -> None:
+    """Continuously emit a JSON result only when stable score meaning changes."""
+    if frame_source not in {"auto", "h264", "png"}:
+        raise ValueError(f"unsupported frame source: {frame_source}")
+    if stable_frames < 1:
+        raise ValueError("stable_frames must be at least 1")
+    if poll_interval < 0:
+        raise ValueError("poll_interval cannot be negative")
+
+    writer = human_writer or AsyncHumanReadableWriter()
+    resolved_serial = resolve_adb_serial(default_serial)
+    if resolved_serial is None:
+        raise RuntimeError("no OPPO ADB device is connected")
+
+    pump: H264FramePump | None = None
+    active_source = "png"
+    fallback_reason: str | None = None
+    if frame_source != "png":
+        try:
+            factory = frame_pump_factory or H264FramePump
+            pump = factory("adb", resolved_serial)
+            pump.start()
+            active_source = "h264"
+        except Exception as exc:
+            if pump is not None:
+                pump.stop()
+                pump = None
+            if frame_source == "h264":
+                raise RuntimeError(f"failed to start H.264 frame source: {exc}") from exc
+            fallback_reason = str(exc)
+
+    ready = {
+        "ready": True,
+        "protocol": "duolingo-screen-reader/v1",
+        "mode": "watch",
+        "frame_source": active_source,
+        "stable_frames": stable_frames,
+    }
+    if fallback_reason is not None:
+        ready["fallback_reason"] = fallback_reason
+    write_json_line(output_stream, ready)
+
+    candidate_signature: tuple[object, ...] | None = None
+    candidate_count = 0
+    emitted_signature: tuple[object, ...] | None = None
+    update_index = 0
+    last_sequence = pump.sequence if pump is not None else 0
+
+    try:
+        while max_updates is None or update_index < max_updates:
+            started_at = time.perf_counter()
+            response_fallback: str | None = None
+            if pump is not None:
+                try:
+                    image = pump.wait_for_frame(
+                        after_sequence=last_sequence,
+                        timeout=1.0,
+                    )
+                    last_sequence = pump.sequence
+                except Exception as exc:
+                    if frame_source == "h264":
+                        raise
+                    response_fallback = str(exc)
+                    pump.stop()
+                    pump = None
+                    active_source = "png"
+                    image = capture_adb_screenshot(resolved_serial)
+            else:
+                image = capture_adb_screenshot(resolved_serial)
+
+            try:
+                result = analyze_image(image, started_at=started_at)
+            except ScoreNotVisibleError:
+                result = {
+                    "elapsed_ms": (time.perf_counter() - started_at) * 1000.0,
+                    "screen_state": "no_score",
+                    "notes": [],
+                    "rests": [],
+                    "events": [],
+                }
+            signature = watch_result_signature(result)
+            if signature == candidate_signature:
+                candidate_count += 1
+            else:
+                candidate_signature = signature
+                candidate_count = 1
+
+            if candidate_count >= stable_frames and signature != emitted_signature:
+                update_index += 1
+                response = {
+                    "ok": True,
+                    "update_index": update_index,
+                    "frame_source": active_source,
+                    "screen_state": result.get("screen_state", "score"),
+                    **result,
+                }
+                if response_fallback is not None:
+                    response["fallback_reason"] = response_fallback
+                write_json_line(output_stream, response)
+                emitted_signature = signature
+                if (
+                    human_readable_out is not None
+                    and response["screen_state"] == "score"
+                ):
+                    writer.submit(human_readable_out, result["events"])
+
+            if poll_interval:
+                time.sleep(poll_interval)
+    finally:
+        if pump is not None:
+            pump.stop()
+        writer.close()
+
+
+def serve_requests(
+    input_stream: TextIO,
+    output_stream: TextIO,
+    default_serial: str | None = None,
+    frame_source: str = "auto",
+    frame_pump_factory: Callable[[str, str], H264FramePump] | None = None,
+    default_human_readable_out: Path | None = None,
+    human_writer: AsyncHumanReadableWriter | None = None,
+) -> None:
+    """Process newline-delimited JSON requests without reloading Python.
+
+    Each request may contain ``image``, ``serial``, and ``out_annotated``.
+    Omitting ``image`` captures the current ADB screen. A malformed request
+    returns an error object and does not terminate the persistent process.
+    """
+    if frame_source not in {"auto", "h264", "png"}:
+        raise ValueError(f"unsupported frame source: {frame_source}")
+
+    writer = human_writer or AsyncHumanReadableWriter()
+    pump: H264FramePump | None = None
+    active_source = "png"
+    fallback_reason: str | None = None
+    resolved_serial = (
+        resolve_adb_serial(default_serial)
+        if frame_source != "png"
+        else default_serial
+    )
+    if frame_source != "png" and resolved_serial is not None:
+        try:
+            factory = frame_pump_factory or H264FramePump
+            pump = factory("adb", resolved_serial)
+            pump.start()
+            active_source = "h264"
+        except Exception as exc:
+            if pump is not None:
+                pump.stop()
+                pump = None
+            if frame_source == "h264":
+                raise RuntimeError(f"failed to start H.264 frame source: {exc}") from exc
+            fallback_reason = str(exc)
+
+    ready = {
+        "ready": True,
+        "protocol": "duolingo-screen-reader/v1",
+        "frame_source": active_source,
+    }
+    if fallback_reason is not None:
+        ready["fallback_reason"] = fallback_reason
+    write_json_line(output_stream, ready)
+
+    try:
+        for line in input_stream:
+            if not line.strip():
+                continue
+            try:
+                request = json.loads(line)
+                if not isinstance(request, dict):
+                    raise TypeError("request must be a JSON object")
+                if request.get("command") == "quit":
+                    write_json_line(output_stream, {"ok": True, "stopped": True})
+                    return
+
+                request_started = time.perf_counter()
+                image_value = request.get("image")
+                annotated_value = request.get("out_annotated")
+                human_value = request.get("human_readable_out")
+                annotated_path = (
+                    Path(annotated_value) if annotated_value is not None else None
+                )
+                human_path = (
+                    Path(human_value)
+                    if human_value is not None
+                    else default_human_readable_out
+                )
+                request_serial = request.get("serial") or resolved_serial
+                response_source = "image" if image_value is not None else "png"
+                response_fallback: str | None = None
+
+                if image_value is not None:
+                    result = analyze_request(
+                        image_path=Path(image_value),
+                        out_annotated=annotated_path,
+                        started_at=request_started,
+                    )
+                elif pump is not None and request_serial == resolved_serial:
+                    sequence = pump.sequence
+                    try:
+                        img = pump.wait_for_frame(
+                            after_sequence=sequence,
+                            timeout=1.0,
+                        )
+                        result = analyze_image(
+                            img,
+                            out_annotated=annotated_path,
+                            started_at=request_started,
+                        )
+                        response_source = "h264"
+                    except Exception as exc:
+                        response_fallback = str(exc)
+                        pump.stop()
+                        pump = None
+                        active_source = "png"
+                        result = analyze_request(
+                            serial=request_serial,
+                            out_annotated=annotated_path,
+                            started_at=request_started,
+                        )
+                else:
+                    result = analyze_request(
+                        serial=request_serial,
+                        out_annotated=annotated_path,
+                        started_at=request_started,
+                    )
+
+                response = {"ok": True, "frame_source": response_source, **result}
+                if response_fallback is not None:
+                    response["fallback_reason"] = response_fallback
+                write_json_line(output_stream, response)
+                if human_path is not None:
+                    writer.submit(human_path, result["events"])
+            except Exception as exc:
+                write_json_line(
+                    output_stream,
+                    {
+                        "ok": False,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+    finally:
+        if pump is not None:
+            pump.stop()
+        writer.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Objective Duolingo Score Reader",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Persistent mode reads one JSON object per line:
+  python3 scripts/duolingo-read-screen-notes.py --serve --serial DEVICE
+  {}
+  {"image":"screen.png","human_readable_out":"notes.txt"}
+  {"command":"quit"}
+""",
+    )
+    parser.add_argument("--image", type=Path, help="Input PNG image path (if omitted, capture from adb)")
+    parser.add_argument("--serial", type=str, default=None, help="ADB device serial")
+    parser.add_argument("--out-annotated", type=Path, help="Path to save annotated visual image")
+    parser.add_argument(
+        "--human-readable-out",
+        type=Path,
+        default=DEFAULT_HUMAN_READABLE_OUTPUT,
+        help=(
+            "Asynchronously write a numbered human-readable list "
+            "(default: duolingo-screen-notes.txt)"
+        ),
+    )
+    parser.add_argument("--json", action="store_true", help="Output raw JSON instead of markdown table")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--serve",
+        action="store_true",
+        help="Read newline-delimited JSON requests from stdin and keep dependencies loaded",
+    )
+    mode_group.add_argument(
+        "--watch",
+        action="store_true",
+        help="Continuously emit JSON only when the recognized score changes",
+    )
+    parser.add_argument(
+        "--stable-frames",
+        type=int,
+        default=2,
+        help="Matching recognitions required before a watch update (default: 2)",
+    )
+    parser.add_argument(
+        "--watch-interval-ms",
+        type=float,
+        default=50.0,
+        help="Delay between watch analyses in milliseconds (default: 50)",
+    )
+    parser.add_argument(
+        "--frame-source",
+        choices=("auto", "h264", "png"),
+        default="auto",
+        help="Persistent-mode frame source (default: auto)",
+    )
+    args = parser.parse_args()
+
+    if args.watch:
+        if args.image is not None or args.out_annotated is not None:
+            parser.error("--image and --out-annotated cannot be used with --watch")
+        try:
+            watch_screen_changes(
+                sys.stdout,
+                default_serial=args.serial,
+                frame_source=args.frame_source,
+                stable_frames=args.stable_frames,
+                poll_interval=args.watch_interval_ms / 1000.0,
+                human_readable_out=args.human_readable_out,
+            )
+        except KeyboardInterrupt:
+            pass
+        return
+
+    if args.serve:
+        if args.image is not None or args.out_annotated is not None:
+            parser.error("--image and --out-annotated belong in each --serve request")
+        serve_requests(
+            sys.stdin,
+            sys.stdout,
+            default_serial=args.serial,
+            frame_source=args.frame_source,
+            default_human_readable_out=args.human_readable_out,
+        )
+        return
+
+    result = analyze_request(
+        image_path=args.image,
+        serial=args.serial,
+        out_annotated=args.out_annotated,
+    )
 
     if args.json:
-        print(json.dumps(
-            {"elapsed_ms": elapsed_ms, "notes": notes, "rests": rests, "events": events},
-            indent=2,
-            ensure_ascii=False,
-        ))
+        print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
-        print_markdown_table(events, elapsed_ms)
+        print_markdown_table(result["events"], result["elapsed_ms"])
+    sys.stdout.flush()
+
+    if args.human_readable_out is not None:
+        writer = AsyncHumanReadableWriter()
+        writer.submit(args.human_readable_out, result["events"])
+        writer.close()
 
 
 if __name__ == "__main__":

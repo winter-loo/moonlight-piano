@@ -2,8 +2,11 @@
 
 import importlib.util
 import hashlib
+import io
 import json
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -26,6 +29,39 @@ def _load_reader():
 
 
 reader = _load_reader()
+
+
+class AdbDevicePreflightTest(unittest.TestCase):
+    def test_accepts_only_the_exact_online_device(self):
+        completed = mock.Mock(
+            stdout=(
+                "List of devices attached\n"
+                "192.168.10.100:5555\tdevice\n"
+                "oppo-serial\tdevice product:foo model:OPPO\n"
+            ),
+            stderr="",
+        )
+        with mock.patch.object(reader.subprocess, "run", return_value=completed):
+            reader.require_adb_device("oppo-serial")
+
+    def test_reports_a_missing_device_before_starting_processes(self):
+        completed = mock.Mock(
+            stdout="List of devices attached\n192.168.10.100:5555\tdevice\n",
+            stderr="",
+        )
+        pump = reader.H264FramePump("adb", "stale-oppo-serial")
+
+        with (
+            mock.patch.object(reader.subprocess, "run", return_value=completed),
+            mock.patch.object(reader.subprocess, "Popen") as popen,
+            self.assertRaisesRegex(
+                RuntimeError,
+                "ADB device 'stale-oppo-serial' is not connected .*state: missing",
+            ),
+        ):
+            pump.start()
+
+        popen.assert_not_called()
 
 
 class CandidateSuppressionTest(unittest.TestCase):
@@ -191,6 +227,284 @@ class SharedAnalysisContextTest(unittest.TestCase):
 
         self.assertEqual(1, find_staff_lines.call_count)
         self.assertEqual(1, locate_judgment_line.call_count)
+
+
+class HumanReadableOutputTest(unittest.TestCase):
+    def test_has_stable_default_output_filename(self):
+        self.assertEqual(
+            Path("duolingo-screen-notes.txt"),
+            reader.DEFAULT_HUMAN_READABLE_OUTPUT,
+        )
+
+    def test_formats_numbered_list_without_changing_json_result(self):
+        image = Image.open(
+            FIXTURE_DIR / "single-flat-mixed-rhythm-and-edge-note.png"
+        ).convert("RGB")
+        result = reader.analyze_image(image)
+
+        self.assertNotIn("human_readable", result)
+        self.assertEqual(
+            [
+                "1. C5 — 八分音符 — 0.5 拍",
+                "2. A4 — 四分音符 — 1 拍",
+                "3. 八分休止符 — 0.5 拍",
+            ],
+            reader.format_human_readable_list(result["events"]).splitlines()[:3],
+        )
+        self.assertTrue(
+            reader.format_human_readable_list(result["events"]).endswith(
+                "15. G4 — 时值未知\n\n已知合计：8 拍\n"
+                "事件统计：10 个音符，5 个休止符，1 个时值未知"
+            )
+        )
+
+    def test_writer_appends_every_record_on_background_thread(self):
+        image = Image.open(
+            FIXTURE_DIR / "single-flat-mixed-rhythm-and-edge-note.png"
+        ).convert("RGB")
+        events = reader.analyze_image(image)["events"]
+        caller_thread = threading.get_ident()
+        formatter_threads = []
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_formatter(_events):
+            formatter_threads.append(threading.get_ident())
+            call_number = len(formatter_threads)
+            if call_number == 1:
+                started.set()
+                release.wait(timeout=2.0)
+            return f"{call_number}. asynchronous output"
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "notes.txt"
+            output_path.write_text("existing record\n", encoding="utf-8")
+            writer = reader.AsyncHumanReadableWriter()
+            with mock.patch.object(
+                reader,
+                "format_human_readable_list",
+                side_effect=blocked_formatter,
+            ):
+                writer.submit(output_path, events)
+                self.assertTrue(started.wait(timeout=1.0))
+                self.assertEqual("existing record\n", output_path.read_text())
+                writer.submit(output_path, events)
+                release.set()
+                writer.close()
+
+            contents = output_path.read_text()
+            self.assertTrue(contents.startswith("existing record\n"))
+            self.assertEqual(2, contents.count("记录时间："))
+            self.assertIn("1. asynchronous output", contents)
+            self.assertIn("2. asynchronous output", contents)
+        self.assertTrue(all(caller_thread != value for value in formatter_threads))
+
+
+class PersistentModeTest(unittest.TestCase):
+    def test_processes_multiple_requests_without_restarting(self):
+        image_path = FIXTURE_DIR / "single-flat-mixed-rhythm-and-edge-note.png"
+        requests = io.StringIO(
+            "\n".join(
+                [
+                    json.dumps({"image": str(image_path)}),
+                    json.dumps({"image": str(image_path)}),
+                    "{not-json}",
+                ]
+            )
+        )
+        responses = io.StringIO()
+
+        reader.serve_requests(requests, responses, frame_source="png")
+
+        messages = [json.loads(line) for line in responses.getvalue().splitlines()]
+        self.assertEqual(
+            {
+                "ready": True,
+                "protocol": "duolingo-screen-reader/v1",
+                "frame_source": "png",
+            },
+            messages[0],
+        )
+        for response in messages[1:3]:
+            self.assertTrue(response["ok"])
+            self.assertNotIn("human_readable", response)
+            self.assertEqual(15, len(response["events"]))
+            self.assertEqual("C5", response["events"][0]["pitch"])
+            self.assertEqual("G4", response["events"][-1]["pitch"])
+        self.assertFalse(messages[3]["ok"])
+        self.assertEqual("JSONDecodeError", messages[3]["error_type"])
+
+    def test_h264_waits_for_a_fresh_frame_then_falls_back_to_png(self):
+        image_path = FIXTURE_DIR / "single-flat-mixed-rhythm-and-edge-note.png"
+        image = Image.open(image_path).convert("RGB")
+
+        class FakeFramePump:
+            def __init__(self, _adb, _serial):
+                self.sequence = 7
+                self.waits = []
+                self.stopped = False
+
+            def start(self):
+                return None
+
+            def wait_for_frame(self, *, after_sequence, timeout):
+                self.waits.append((after_sequence, timeout))
+                if len(self.waits) == 1:
+                    self.sequence += 1
+                    return image.copy()
+                raise TimeoutError("stale test stream")
+
+            def stop(self):
+                self.stopped = True
+
+        pump = FakeFramePump("adb", "device")
+        requests = io.StringIO("{}\n{}\n")
+        responses = io.StringIO()
+
+        with mock.patch.object(
+            reader, "capture_adb_screenshot", return_value=image.copy()
+        ) as capture:
+            reader.serve_requests(
+                requests,
+                responses,
+                default_serial="device",
+                frame_source="auto",
+                frame_pump_factory=lambda _adb, _serial: pump,
+            )
+
+        messages = [json.loads(line) for line in responses.getvalue().splitlines()]
+        self.assertEqual("h264", messages[0]["frame_source"])
+        self.assertEqual("h264", messages[1]["frame_source"])
+        self.assertEqual("png", messages[2]["frame_source"])
+        self.assertIn("stale test stream", messages[2]["fallback_reason"])
+        self.assertEqual([(7, 1.0), (8, 1.0)], pump.waits)
+        self.assertEqual(1, capture.call_count)
+        self.assertTrue(pump.stopped)
+
+
+class WatchModeTest(unittest.TestCase):
+    def test_semantic_signature_ignores_scrolling_coordinates(self):
+        first = {
+            "event_type": "note",
+            "pitch": "C4",
+            "duration_type": "Quarter Note (四分音符)",
+            "duration_beats": 1.0,
+            "x": 900.0,
+            "y": 300.0,
+        }
+        moved = {**first, "x": 850.0, "y": 301.0}
+
+        self.assertEqual(
+            reader.semantic_event_signature([first]),
+            reader.semantic_event_signature([moved]),
+        )
+
+    def test_emits_initial_score_and_only_stable_semantic_changes(self):
+        image = Image.new("RGB", (16, 16), "white")
+
+        class FakeFramePump:
+            def __init__(self):
+                self.sequence = 0
+                self.stopped = False
+
+            def start(self):
+                return None
+
+            def wait_for_frame(self, *, after_sequence, timeout):
+                self.sequence = after_sequence + 1
+                return image.copy()
+
+            def stop(self):
+                self.stopped = True
+
+        class FakeWriter:
+            def __init__(self):
+                self.records = []
+                self.closed = False
+
+            def submit(self, path, events):
+                self.records.append((path, events))
+
+            def close(self):
+                self.closed = True
+
+        def result(pitch, x):
+            event = {
+                "event_type": "note",
+                "pitch": pitch,
+                "duration_type": "Quarter Note (四分音符)",
+                "duration_beats": 1.0,
+                "x": x,
+            }
+            return {
+                "elapsed_ms": 10.0,
+                "notes": [event],
+                "rests": [],
+                "events": [event],
+            }
+
+        pump = FakeFramePump()
+        writer = FakeWriter()
+        responses = io.StringIO()
+        analyzed = [
+            result("C4", 900),
+            result("C4", 880),
+            result("C4", 860),
+            result("D4", 840),
+            result("D4", 820),
+        ]
+
+        with mock.patch.object(reader, "analyze_image", side_effect=analyzed):
+            reader.watch_screen_changes(
+                responses,
+                default_serial="device",
+                frame_source="h264",
+                stable_frames=2,
+                poll_interval=0,
+                frame_pump_factory=lambda _adb, _serial: pump,
+                human_readable_out=Path("notes.txt"),
+                human_writer=writer,
+                max_updates=2,
+            )
+
+        messages = [json.loads(line) for line in responses.getvalue().splitlines()]
+        self.assertEqual("watch", messages[0]["mode"])
+        self.assertEqual(["C4", "D4"], [item["events"][0]["pitch"] for item in messages[1:]])
+        self.assertEqual([1, 2], [item["update_index"] for item in messages[1:]])
+        self.assertEqual(2, len(writer.records))
+        self.assertTrue(writer.closed)
+        self.assertTrue(pump.stopped)
+
+    def test_no_score_is_a_stable_state_not_a_fatal_error(self):
+        image = Image.new("RGB", (720, 1612), "white")
+
+        class FakeFramePump:
+            sequence = 0
+
+            def start(self):
+                return None
+
+            def wait_for_frame(self, *, after_sequence, timeout):
+                self.sequence = after_sequence + 1
+                return image
+
+            def stop(self):
+                return None
+
+        responses = io.StringIO()
+        reader.watch_screen_changes(
+            responses,
+            default_serial="device",
+            frame_source="h264",
+            stable_frames=2,
+            poll_interval=0,
+            frame_pump_factory=lambda _adb, _serial: FakeFramePump(),
+            max_updates=1,
+        )
+
+        messages = [json.loads(line) for line in responses.getvalue().splitlines()]
+        self.assertEqual("no_score", messages[1]["screen_state"])
+        self.assertEqual([], messages[1]["events"])
 
 
 class RealScreenRegressionTest(unittest.TestCase):

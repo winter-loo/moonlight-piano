@@ -17,6 +17,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -26,11 +27,32 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+import duolingo_keyboard_detect as _kbdetect  # noqa: E402
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCORE_DOC = REPO_ROOT / "docs/product/月光琴房-产品文档-v0.1.md"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs/duolingo-stage4-section7/timed-run"
 REMOTE_INPUT_BRIDGE = "/data/local/tmp/codex-input-bridge.jar"
+
+_DETECTED_KEY_POINTS: dict[str, tuple[int, int]] | None = None
+
+
+def resolve_key_points_for(args) -> dict[str, tuple[int, int]]:
+    """Read the keyboard off the device once per run; --keyboard-profile overrides."""
+    global _DETECTED_KEY_POINTS
+    if _DETECTED_KEY_POINTS is None:
+        _DETECTED_KEY_POINTS = _kbdetect.resolve_key_points(
+            serial=getattr(args, "serial", None),
+            adb=getattr(args, "adb", "adb"),
+            profile=getattr(args, "keyboard_profile", None),
+            profiles=KEYBOARD_PROFILES,
+        )
+    return _DETECTED_KEY_POINTS
+
 
 KEYBOARD_PROFILES = {
     "greensleeves-c4": {
@@ -69,6 +91,54 @@ KEYBOARD_PROFILES = {
         "A5": (1295, 600),
         "Bb5": (1355, 475),
         "B5": (1416, 600),
+    },
+    # Stage 4, section 2's Tonight (Kesha) challenge opens a C4-E5 keyboard,
+    # a different range from section 1.  Centers come from the app's own key
+    # labels; the single flat in the key signature makes B-flat the spelling
+    # that appears on the black key cap.
+    "tonight-c4": {
+        "C4": (179, 600),
+        "Db4": (245, 475),
+        "D4": (312, 600),
+        "Eb4": (378, 475),
+        "E4": (445, 600),
+        "F4": (594, 600),
+        "Gb4": (660, 475),
+        "G4": (727, 600),
+        "Ab4": (793, 475),
+        "A4": (860, 600),
+        "Bb4": (926, 475),
+        "B4": (993, 600),
+        "C5": (1122, 600),
+        "Db5": (1208, 475),
+        "D5": (1255, 600),
+        "Eb5": (1341, 475),
+        "E5": (1388, 600),
+    },
+    # Stage 4, section 1's Autumn challenge.  Centers re-measured from this
+    # course's own key boundaries (white keys from their separator midpoints,
+    # black keys from their caps).  The key signature carries one flat, so the
+    # B keys are spelled Bb; B natural never appears in this score.
+    "autumn-f4": {
+        "F4": (172, 600),
+        "G4": (293, 600),
+        "A4": (414, 600),
+        "Bb4": (476, 475),
+        "B4": (535, 600),
+        "C5": (674, 600),
+        "Db5": (734, 475),
+        "D5": (793, 600),
+        "Eb5": (855, 475),
+        "E5": (913, 600),
+        "F5": (1053, 600),
+        "Gb5": (1113, 475),
+        "G5": (1172, 600),
+        "Ab5": (1234, 475),
+        "A5": (1293, 600),
+        "Bb5": (1355, 475),
+        "B5": (1413, 600),
+        "Gb4": (234, 475),
+        "Ab4": (355, 475),
     },
     # Stage 4, section 14's continuous Musette challenge uses the same
     # nominal F4-B5 range but shifts the middle white-key hit regions. These
@@ -791,7 +861,7 @@ class PersistentInputShell:
                 "-s",
                 serial,
                 "shell",
-                "-t",
+                "-T",
                 f"CLASSPATH={REMOTE_INPUT_BRIDGE} "
                 "app_process /system/bin CodexInputBridge",
             ],
@@ -836,6 +906,28 @@ class PersistentInputShell:
             self._sent += 1
             pending = self._sent - len(self._ack_ns)
         return sent_ns, pending
+
+    def warmup(self, *, x: int = 10, y: int = 360, timeout: float = 3.0) -> float:
+        """Warm up the app_process JVM, JIT, and InputManager Binder channel.
+
+        Sends a dummy touch at a safe off-canvas coordinate before any musical
+        events so that Event 0 (the launch note) does not suffer from JVM/IPC
+        startup latency.
+        """
+        if self._process.poll() is not None:
+            raise RuntimeError(f"persistent adb shell exited with {self._process.returncode}")
+        assert self._process.stdin is not None
+        start_ns = time.monotonic_ns()
+        warmup_seq = 999901
+        self._process.stdin.write(f"DOWN {x} {y} {warmup_seq}\n")
+        self._process.stdin.write(f"UP {x} {y} {warmup_seq + 1}\n")
+        self._process.stdin.flush()
+        with self._condition:
+            self._sent += 2
+            self._condition.wait_for(
+                lambda: (warmup_seq + 1) in self._ack_ns, timeout=timeout
+            )
+        return (time.monotonic_ns() - start_ns) / 1_000_000
 
     @property
     def pitches(self) -> tuple[str, ...]:
@@ -1080,6 +1172,183 @@ def add_chunk_actions(
     return next_sequence
 
 
+@dataclasses.dataclass(frozen=True)
+class HeldNote:
+    """A key whose DOWN was sent and whose UP is still owed."""
+
+    event_index: int
+    pitch: str
+    release_beat: float
+    scheduled_release_ns: int
+
+
+class PlaybackGate:
+    """Cancellable stop gate for frozen-plan playback.
+
+    ``docs/practiced-songs/AGENTS.md`` states the send condition as three
+    independent terms::
+
+        playback_gate == OPEN
+        event_index <= last_valid_event_index
+        current_beat < stop_after_beat
+
+    This object owns all three, so no caller can send a down-stroke that the
+    end-of-song audit already ruled out.  ``close`` is safe to call from a
+    frame-watching thread: a live screen verdict outranks whatever the frozen
+    plan still lists, and closing wakes any sleeper immediately.
+    """
+
+    _SPIN_TAIL_NS = 2_000_000
+
+    def __init__(
+        self,
+        *,
+        last_valid_event_index: int | None = None,
+        stop_after_beat: float | None = None,
+    ) -> None:
+        self._last_valid_event_index = last_valid_event_index
+        self._stop_after_beat = stop_after_beat
+        self._condition = threading.Condition()
+        self._closed_reason: str | None = None
+        self._closed_planned = False
+
+    @property
+    def last_valid_event_index(self) -> int | None:
+        return self._last_valid_event_index
+
+    @property
+    def stop_after_beat(self) -> float | None:
+        return self._stop_after_beat
+
+    @property
+    def closed_reason(self) -> str | None:
+        with self._condition:
+            return self._closed_reason
+
+    @property
+    def is_open(self) -> bool:
+        with self._condition:
+            return self._closed_reason is None
+
+    @property
+    def closed_planned(self) -> bool:
+        """Whether the close was the audit boundary rather than a failure."""
+        with self._condition:
+            return self._closed_planned
+
+    def close(self, reason: str, *, planned: bool = False) -> bool:
+        """Close permanently and wake every sleeper.  The first reason wins.
+
+        ``planned`` marks the expected ending -- the stop boundary was reached
+        with the score intact.  Every other caller (a screen verdict, an
+        exception, an operator interrupt) leaves it ``False``, which tells
+        :func:`plan_gate_closure` to lift the keys immediately.
+        """
+        with self._condition:
+            if self._closed_reason is not None:
+                return False
+            self._closed_reason = reason
+            self._closed_planned = planned
+            self._condition.notify_all()
+            return True
+
+    def admits(self, event_index: int, beat: float) -> bool:
+        """Whether the DOWN of ``event_index`` at ``beat`` may still be sent.
+
+        Releases deliberately do not pass through here.  The last admitted note
+        keeps its full ``duration_beats``, so its UP is still owed even though
+        ``beat`` has by then reached ``stop_after_beat``.
+        """
+        with self._condition:
+            if self._closed_reason is not None:
+                return False
+        if (
+            self._last_valid_event_index is not None
+            and event_index > self._last_valid_event_index
+        ):
+            self.close(
+                f"event {event_index} is past last_valid_event_index "
+                f"{self._last_valid_event_index}",
+                planned=True,
+            )
+            return False
+        if self._stop_after_beat is not None and beat >= self._stop_after_beat:
+            self.close(
+                f"beat {beat:g} reached stop_after_beat {self._stop_after_beat:g}",
+                planned=True,
+            )
+            return False
+        return self.is_open
+
+    def wait_until(self, deadline_ns: int) -> bool:
+        """Sleep until ``deadline_ns``; ``False`` if the gate closed first."""
+        while True:
+            with self._condition:
+                if self._closed_reason is not None:
+                    return False
+                remaining_ns = deadline_ns - time.monotonic_ns()
+                if remaining_ns <= self._SPIN_TAIL_NS:
+                    break
+                # Waiting on the condition drops the lock, so ``close`` from a
+                # frame-watching thread cuts this sleep short instead of
+                # leaving the rest of the song queued behind a dead deadline.
+                self._condition.wait(
+                    (remaining_ns - self._SPIN_TAIL_NS) / 1_000_000_000
+                )
+        # The last 2 ms are spun outside the lock so scheduler wake-up jitter
+        # does not eat into the measured ``input_advance_ms`` budget.
+        while time.monotonic_ns() < deadline_ns:
+            pass
+        return True
+
+
+def wait_for_action(
+    gate: PlaybackGate, deadline_ns: int, window_ns: int
+) -> bool:
+    """Sleep to ``deadline_ns`` in short slices, re-reading the gate each one.
+
+    ``AGENTS.md`` requires that at most the next note -- or roughly 200-300 ms
+    of actions -- is ever committed, so a long rest cannot strand the gate
+    behind a single uninterruptible sleep.  Returns ``False`` once the gate is
+    closed, which means the caller must stop sending.
+    """
+    while True:
+        if not gate.is_open:
+            return False
+        now_ns = time.monotonic_ns()
+        if deadline_ns - now_ns <= window_ns:
+            return gate.wait_until(deadline_ns)
+        if not gate.wait_until(now_ns + window_ns):
+            return False
+
+
+def plan_gate_closure(
+    planned: bool, held: tuple[HeldNote, ...], now_ns: int
+) -> tuple[tuple[HeldNote, int], ...]:
+    """Choose when each still-held key is released once the gate closes.
+
+    ``held`` lists notes whose DOWN was sent but whose UP is still owed.
+    Returns one ``(note, release_ns)`` pair per key, in release order.
+
+    The two closures need opposite handling.  A *planned* stop means the audit
+    boundary was reached with the score intact, so the last valid note must
+    ring for its full ``duration_beats``; truncating it would under-run the
+    very note the three-star run is judged on.  An *abort* means the app is
+    already in a state the plan does not model, so every key comes up now
+    rather than injecting another beat of input into a broken screen.
+
+    A release is never pushed past its scheduled deadline, so this can only
+    shorten a note, never extend one into the following rest.
+    """
+    releases: list[tuple[HeldNote, int]] = []
+    for note in sorted(held, key=lambda item: item.scheduled_release_ns):
+        release_ns = note.scheduled_release_ns if planned else now_ns
+        releases.append(
+            (note, min(max(release_ns, now_ns), note.scheduled_release_ns))
+        )
+    return tuple(releases)
+
+
 def wait_until_ns(deadline_ns: int) -> None:
     # Sleeping most of the interval avoids spinning for a full minute; the last
     # 2 ms are kept local so scheduler wake-up error does not accumulate.
@@ -1120,7 +1389,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     input_shell = PersistentInputShell(
         adb,
         args.serial,
-        key_points=KEYBOARD_PROFILES[args.keyboard_profile],
+        key_points=resolve_key_points_for(args),
     )
     action_heap: list[InputAction] = []
     next_sequence = add_chunk_actions(action_heap, chunks[0], 0)
@@ -1350,7 +1619,7 @@ def run_known_tail(args: argparse.Namespace) -> dict[str, object]:
     input_shell = PersistentInputShell(
         adb,
         args.serial,
-        key_points=KEYBOARD_PROFILES[args.keyboard_profile],
+        key_points=resolve_key_points_for(args),
     )
     prompt_monitor_stop = threading.Event()
     frame_archive_stop = threading.Event()
@@ -1554,7 +1823,7 @@ def run_segmented(args: argparse.Namespace) -> dict[str, object]:
     input_shell = PersistentInputShell(
         adb,
         args.serial,
-        key_points=KEYBOARD_PROFILES[args.keyboard_profile],
+        key_points=resolve_key_points_for(args),
     )
     sequence = 0
     segment_number = 0
@@ -1845,7 +2114,7 @@ def run_generic_visible(args: argparse.Namespace) -> dict[str, object]:
     input_shell = PersistentInputShell(
         adb,
         args.serial,
-        key_points=KEYBOARD_PROFILES[args.keyboard_profile],
+        key_points=resolve_key_points_for(args),
     )
     sequence = 0
     segment_number = 0
@@ -2167,7 +2436,7 @@ def run_streaming_visible(args: argparse.Namespace) -> dict[str, object]:
     input_shell = PersistentInputShell(
         adb,
         args.serial,
-        key_points=KEYBOARD_PROFILES[args.keyboard_profile],
+        key_points=resolve_key_points_for(args),
     )
     scheduler = LiveActionScheduler(input_shell, actions)
     scheduled_slots: dict[tuple[int, int], tuple[str, float]] = {}
@@ -2508,7 +2777,7 @@ def run_visual_follow(args: argparse.Namespace) -> dict[str, object]:
     input_shell = PersistentInputShell(
         adb,
         args.serial,
-        key_points=KEYBOARD_PROFILES[args.keyboard_profile],
+        key_points=resolve_key_points_for(args),
     )
     scheduler = LiveActionScheduler(input_shell, actions)
     scheduler.start()
@@ -2873,13 +3142,12 @@ def run_frozen_plan(args: argparse.Namespace) -> dict[str, object]:
     if adb is None:
         raise FileNotFoundError(f"adb executable not found: {args.adb}")
     assert args.frozen_plan is not None
-    raw_events = json.loads(
-        args.frozen_plan.read_text(encoding="utf-8")
-    ).get("events")
+    plan_doc = json.loads(args.frozen_plan.read_text(encoding="utf-8"))
+    raw_events = plan_doc.get("events")
     if not isinstance(raw_events, list) or not raw_events:
         raise ValueError("frozen plan contains no events")
 
-    key_points = KEYBOARD_PROFILES[args.keyboard_profile]
+    key_points = resolve_key_points_for(args)
     events: list[tuple[float, str, float]] = []
     for index, raw in enumerate(raw_events):
         event = (
@@ -2895,15 +3163,48 @@ def run_frozen_plan(args: argparse.Namespace) -> dict[str, object]:
     if events[0][0] != 0:
         raise ValueError("frozen plan must begin at beat zero")
 
+    # The stop boundary belongs to the plan's end-of-song audit.  The command
+    # line only overrides it when replaying a plan that predates the audit.
+    last_valid_event_index = (
+        args.last_valid_event_index
+        if args.last_valid_event_index is not None
+        else plan_doc.get("last_valid_event_index")
+    )
+    stop_after_beat = (
+        args.stop_after_beat
+        if args.stop_after_beat is not None
+        else plan_doc.get("stop_after_beat")
+    )
+    if last_valid_event_index is not None and not (
+        0 <= last_valid_event_index < len(events)
+    ):
+        raise ValueError(
+            f"last_valid_event_index {last_valid_event_index} is outside the "
+            f"{len(events)} frozen events"
+        )
+    gate = PlaybackGate(
+        last_valid_event_index=last_valid_event_index,
+        stop_after_beat=stop_after_beat,
+    )
+    if not gate.admits(0, events[0][0]):
+        raise ValueError(
+            "the frozen plan's stop boundary excludes its own launch note"
+        )
+
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     beat_ns = round(60_000_000_000 / args.bpm)
     advance_ns = round(args.input_advance_ms * 1_000_000)
     score_start_delay_ns = round(args.score_start_delay_ms * 1_000_000)
     input_shell = PersistentInputShell(adb, args.serial, key_points=key_points)
+    try:
+        bridge_warmup_ms = input_shell.warmup()
+    except Exception:
+        bridge_warmup_ms = None
     log: dict[str, object] = {
         "mode": "frozen-event-plan-device-ack-clock",
         "serial": args.serial,
+        "bridge_warmup_ms": bridge_warmup_ms,
         "plan": str(args.frozen_plan),
         "keyboard_profile": args.keyboard_profile,
         "bpm": args.bpm,
@@ -2911,10 +3212,40 @@ def run_frozen_plan(args: argparse.Namespace) -> dict[str, object]:
         "input_advance_ms": args.input_advance_ms,
         "score_start_delay_ms": args.score_start_delay_ms,
         "event_count": len(events),
+        "last_valid_event_index": last_valid_event_index,
+        "stop_after_beat": stop_after_beat,
+        "release_window_ms": args.release_window_ms,
         "actions": [],
     }
     sequence = 0
     score_sequences: set[int] = set()
+    held: dict[int, HeldNote] = {}
+
+    def append_action(
+        *,
+        sequence: int,
+        event_index: int,
+        kind: str,
+        pitch: str,
+        beat: float,
+        deadline_ns: int,
+        sent_ns: int,
+        pending: int,
+    ) -> None:
+        log["actions"].append(  # type: ignore[union-attr]
+            {
+                "sequence": sequence,
+                "event": event_index,
+                "kind": kind,
+                "pitch": pitch,
+                "beat": beat,
+                "scheduled_ns": deadline_ns,
+                "sent_ns": sent_ns,
+                "send_drift_ms": (sent_ns - deadline_ns) / 1_000_000,
+                "target_device_ack_ns": deadline_ns + advance_ns,
+                "device_queue_depth_after_send": pending,
+            }
+        )
 
     try:
         launch_deadline_ns = time.monotonic_ns() + round(
@@ -2943,46 +3274,110 @@ def run_frozen_plan(args: argparse.Namespace) -> dict[str, object]:
         )
         sequence += 1
 
-        queue: list[tuple[int, int, int, str, str, float]] = []
-        for event_index, (start_beat, pitch, duration_beats) in enumerate(events):
+        def release_deadline_ns(event_index: int, release_beat: float) -> int:
             phase_delay_ns = score_start_delay_ns if event_index else 0
-            if event_index:
-                deadline = (
-                    origin_ack_ns
-                    + phase_delay_ns
-                    + round(start_beat * beat_ns)
-                    - advance_ns
-                )
-                queue.append((deadline, 1, event_index, "DOWN", pitch, start_beat))
-            release_beat = start_beat + duration_beats
-            deadline = (
+            return (
                 origin_ack_ns
                 + phase_delay_ns
                 + round(release_beat * beat_ns)
                 - advance_ns
             )
-            queue.append((deadline, 0, event_index, "UP", pitch, release_beat))
-        queue.sort(key=lambda item: (item[0], item[1], item[2]))
 
-        for deadline_ns, _, event_index, kind, pitch, beat in queue:
-            wait_until_ns(deadline_ns)
+        # The launch note is already down, so it owes an UP from the start.
+        held[0] = HeldNote(
+            event_index=0,
+            pitch=events[0][1],
+            release_beat=events[0][0] + events[0][2],
+            scheduled_release_ns=release_deadline_ns(0, events[0][0] + events[0][2]),
+        )
+
+        actions: list[tuple[int, int, int, str, str, float]] = []
+        for event_index, (start_beat, pitch, duration_beats) in enumerate(events):
+            if event_index:
+                deadline = (
+                    origin_ack_ns
+                    + score_start_delay_ns
+                    + round(start_beat * beat_ns)
+                    - advance_ns
+                )
+                actions.append((deadline, 1, event_index, "DOWN", pitch, start_beat))
+            release_beat = start_beat + duration_beats
+            actions.append(
+                (
+                    release_deadline_ns(event_index, release_beat),
+                    0,
+                    event_index,
+                    "UP",
+                    pitch,
+                    release_beat,
+                )
+            )
+        actions.sort(key=lambda item: (item[0], item[1], item[2]))
+
+        # Nothing is queued on the device ahead of time: each action waits for
+        # its own deadline in short slices, so the gate can stop the run
+        # between any two of them.
+        window_ns = max(1, round(args.release_window_ms * 1_000_000))
+        for deadline_ns, _, event_index, kind, pitch, beat in actions:
+            if kind == "UP":
+                if event_index not in held:
+                    continue
+            elif not gate.admits(event_index, beat):
+                break
+            if not wait_for_action(gate, deadline_ns, window_ns):
+                break
+            # Re-read the gate after the sleep: a frame watcher may have closed
+            # it while this action was still waiting for its deadline.
+            if kind == "DOWN" and not gate.admits(event_index, beat):
+                break
             sent_ns, pending = input_shell.send(kind, pitch, sequence)
             score_sequences.add(sequence)
-            log["actions"].append(  # type: ignore[union-attr]
-                {
-                    "sequence": sequence,
-                    "event": event_index,
-                    "kind": kind,
-                    "pitch": pitch,
-                    "beat": beat,
-                    "scheduled_ns": deadline_ns,
-                    "sent_ns": sent_ns,
-                    "send_drift_ms": (sent_ns - deadline_ns) / 1_000_000,
-                    "target_device_ack_ns": deadline_ns + advance_ns,
-                    "device_queue_depth_after_send": pending,
-                }
+            append_action(
+                sequence=sequence,
+                event_index=event_index,
+                kind=kind,
+                pitch=pitch,
+                beat=beat,
+                deadline_ns=deadline_ns,
+                sent_ns=sent_ns,
+                pending=pending,
             )
             sequence += 1
+            if kind == "DOWN":
+                release_beat = beat + events[event_index][2]
+                held[event_index] = HeldNote(
+                    event_index=event_index,
+                    pitch=pitch,
+                    release_beat=release_beat,
+                    scheduled_release_ns=release_deadline_ns(
+                        event_index, release_beat
+                    ),
+                )
+            else:
+                held.pop(event_index, None)
+
+        gate.close("frozen plan exhausted", planned=True)
+        # Retire whatever is still down under the closure policy before the
+        # teardown sweep, so a planned stop keeps the last note's full length.
+        for note, release_ns in plan_gate_closure(
+            gate.closed_planned, tuple(held.values()), time.monotonic_ns()
+        ):
+            wait_until_ns(release_ns)
+            sent_ns, pending = input_shell.send("UP", note.pitch, sequence)
+            score_sequences.add(sequence)
+            append_action(
+                sequence=sequence,
+                event_index=note.event_index,
+                kind="UP",
+                pitch=note.pitch,
+                beat=note.release_beat,
+                deadline_ns=release_ns,
+                sent_ns=sent_ns,
+                pending=pending,
+            )
+            sequence += 1
+            held.pop(note.event_index, None)
+
         log["all_score_actions_acked"] = input_shell.wait_for(
             score_sequences, timeout=5.0
         )
@@ -2995,7 +3390,21 @@ def run_frozen_plan(args: argparse.Namespace) -> dict[str, object]:
         )
         result_path.write_bytes(capture.stdout)
         log["result_checkpoint"] = str(result_path)
+    except BaseException as exc:
+        # An operator interrupt or a device failure is not a planned ending, so
+        # the closure policy lifts every held key immediately.
+        gate.close(f"playback aborted: {exc!r}")
+        raise
     finally:
+        log["playback_gate_closed_reason"] = gate.closed_reason
+        log["playback_gate_close_was_planned"] = gate.closed_planned
+        log["events_sent"] = sorted(
+            {
+                int(action["event"])
+                for action in log["actions"]  # type: ignore[union-attr]
+                if action["kind"] == "DOWN"
+            }
+        )
         for action in log["actions"]:  # type: ignore[union-attr]
             ack_ns = input_shell.ack_ns(int(action["sequence"]))
             action["device_ack_ns"] = ack_ns
@@ -3032,8 +3441,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--keyboard-profile",
         choices=tuple(KEYBOARD_PROFILES),
-        default="greensleeves-c4",
-        help="map score pitches to the keyboard layout shown by this lesson",
+        default=None,
+        help="override the on-screen keyboard detection with a stored profile",
     )
     parser.add_argument("--score-doc", type=Path, default=DEFAULT_SCORE_DOC)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
@@ -3155,6 +3564,24 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="delay frozen-plan events after the launch note while the score starts scrolling",
+    )
+    parser.add_argument(
+        "--release-window-ms",
+        type=float,
+        default=250.0,
+        help="longest frozen-plan sleep before the playback gate is re-read",
+    )
+    parser.add_argument(
+        "--last-valid-event-index",
+        type=int,
+        default=None,
+        help="override the frozen plan's last audited event; later events are never sent",
+    )
+    parser.add_argument(
+        "--stop-after-beat",
+        type=float,
+        default=None,
+        help="override the frozen plan's stop beat; no note starts at or after it",
     )
     parser.add_argument("--visual-pipeline-ms", type=float, default=240.0)
     parser.add_argument("--visual-schedule-x", type=int, default=620)

@@ -53,3 +53,4 @@ __pycache__/
 *.pyc
 androguard.db
 androguard.log
+/tests/fixtures/duolingo-realtime-measure/

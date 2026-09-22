@@ -93,8 +93,9 @@
 - [曲尾 54–66 秒拼图](../../outputs/duolingo-stage4-section14-musette/ultimate/pass-7-two-anchor/tail-54-66-montage.png)
 - [设备时序日志](../../outputs/duolingo-stage4-section14-musette/ultimate/pass-7-two-anchor/performance/timing-log.json)
 - [播放器参数与动作记录](../../outputs/duolingo-stage4-section14-musette/ultimate/pass-7-two-anchor/player.stdout.json)
-- [原始 79 事件冻结计划](../../outputs/duolingo-stage4-section14-musette/ultimate/musette-frozen-plan.json)
+- [原始 79 事件冻结计划](../../outputs/duolingo-stage4-section14-musette/ultimate/musette-frozen-plan.json)（仅作曲尾多余输入的证据）
+- [修正后的 69 事件冻结计划](../../outputs/duolingo-stage4-section14-musette/ultimate/musette-corrected-frozen-plan.json)（唯一可演奏版本，内含停止闸门边界）
 
 ## 记录说明
 
-正式谱面依据冻结计划的前 69 个事件、逐帧曲尾复核和最后一拍休止共同重建。原冻结计划及其测试仍保留了 10 个曲尾多余事件，因此仅作为问题证据，不能再作为完整正确谱面的时间 oracle；本文件的 18 小节、69 音版本是当前复核后的曲目记录。
+正式谱面依据冻结计划的前 69 个事件、逐帧曲尾复核和最后一拍休止共同重建。原冻结计划及其测试仍保留了 10 个曲尾多余事件，因此仅作为问题证据，不能再作为完整正确谱面的时间 oracle；本文件的 18 小节、69 音版本是当前复核后的曲目记录，并已固化为修正冻结计划与 `tests/test_duolingo_musette_plan.py` 的 oracle。
