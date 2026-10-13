@@ -16,6 +16,7 @@ pub enum BasicError {
     InvalidModel,
     EmptyOutput,
     BlockTooLarge,
+    ChannelLengthMismatch,
     TooManyEvents,
     EventOutsideBlock,
     EventsOutOfOrder,
@@ -53,6 +54,7 @@ struct Voice {
     note: u8,
     active: bool,
     held: bool,
+    key_down: bool,
     age: u64,
     count: usize,
     modes: [Mode; MODES],
@@ -64,6 +66,7 @@ impl Default for Voice {
             note: 0,
             active: false,
             held: false,
+            key_down: false,
             age: 0,
             count: 0,
             modes: [Mode::default(); MODES],
@@ -75,6 +78,8 @@ pub struct BasicPianoEngine {
     keys: [Key; KEYS],
     voices: [Voice; MAX_VOICES],
     next_age: u64,
+    sustain: bool,
+    body: [Mode; 2],
     // One-pole release damping, compiled for this sample rate.
     release: f64,
 }
@@ -116,10 +121,23 @@ impl BasicPianoEngine {
                 return Err(BasicError::InvalidModel);
             }
         }
+        let mut body = [Mode::default(); 2];
+        for (mode, frequency) in body.iter_mut().zip([110.0, 220.0]) {
+            let coefficients = modal_coefficients(frequency, 0.55, sample_rate_hz as f64)
+                .map_err(|_| BasicError::InvalidModel)?;
+            *mode = Mode {
+                feedback_1: coefficients.feedback_1,
+                feedback_2: coefficients.feedback_2,
+                amplitude: 0.000001,
+                ..Mode::default()
+            };
+        }
         Ok(Self {
             keys,
             voices: [Voice::default(); MAX_VOICES],
             next_age: 0,
+            sustain: false,
+            body,
             release: 10.0_f64.powf(-3.0 / (0.25 * sample_rate_hz as f64)),
         })
     }
@@ -129,6 +147,29 @@ impl BasicPianoEngine {
         start: u64,
         events: &[PianoEvent],
         output: &mut [f32],
+    ) -> Result<(), BasicError> {
+        self.process_channels(start, events, output, None)
+    }
+
+    pub fn process_stereo_block(
+        &mut self,
+        start: u64,
+        events: &[PianoEvent],
+        left: &mut [f32],
+        right: &mut [f32],
+    ) -> Result<(), BasicError> {
+        if left.len() != right.len() {
+            return Err(BasicError::ChannelLengthMismatch);
+        }
+        self.process_channels(start, events, left, Some(right))
+    }
+
+    fn process_channels(
+        &mut self,
+        start: u64,
+        events: &[PianoEvent],
+        output: &mut [f32],
+        mut right: Option<&mut [f32]>,
     ) -> Result<(), BasicError> {
         if output.is_empty() {
             return Err(BasicError::EmptyOutput);
@@ -170,6 +211,12 @@ impl BasicPianoEngine {
                     return Err(BasicError::InvalidVelocity);
                 }
             }
+            if let PianoEventKind::Sustain { position } = event.kind {
+                if !position.is_finite() || !(0.0..=1.0).contains(&position) {
+                    output.fill(0.0);
+                    return Err(BasicError::InvalidVelocity);
+                }
+            }
         }
         let mut next_event = 0;
         for (offset, sample) in output.iter_mut().enumerate() {
@@ -178,12 +225,14 @@ impl BasicPianoEngine {
                 self.apply(events[next_event].kind);
                 next_event += 1;
             }
-            let mut sum = 0.0;
+            let mut left_sum = 0.0;
+            let mut right_sum = 0.0;
             for voice in &mut self.voices {
                 if !voice.active {
                     continue;
                 }
                 let mut energy = 0.0;
+                let mut voice_sum = 0.0;
                 for mode in voice.modes.iter_mut().take(voice.count) {
                     let next = mode.feedback_1 * mode.current + mode.feedback_2 * mode.previous;
                     mode.previous = mode.current;
@@ -192,21 +241,47 @@ impl BasicPianoEngine {
                     } else {
                         next * self.release
                     };
-                    sum += mode.current;
+                    voice_sum += mode.current;
                     energy += mode.current.abs() + mode.previous.abs();
                 }
                 if !voice.held && energy < 0.00001 {
                     voice.active = false;
                 }
+                let pan = f64::from(voice.note - FIRST_NOTE) / (KEYS - 1) as f64;
+                left_sum += voice_sum * (1.0 - 0.35 * pan);
+                right_sum += voice_sum * (0.65 + 0.35 * pan);
             }
+            // Small, persistent shared modal response, fed by every key. This is
+            // a simplified body coloration, not a bidirectional soundboard model.
+            let body_input = (left_sum + right_sum) * 0.5;
+            for mode in &mut self.body {
+                let next = mode.feedback_1 * mode.current
+                    + mode.feedback_2 * mode.previous
+                    + mode.amplitude * body_input;
+                mode.previous = mode.current;
+                mode.current = next;
+            }
+            left_sum += 0.08 * self.body[0].current + 0.03 * self.body[1].current;
+            right_sum += 0.03 * self.body[0].current + 0.08 * self.body[1].current;
             // A bounded, continuous master response prevents a 32-key chord from clipping.
-            let rendered = (0.12 * sum / (1.0 + 0.2 * sum.abs())) as f32;
-            if !rendered.is_finite() {
+            let left_rendered = (0.12 * left_sum / (1.0 + 0.2 * left_sum.abs())) as f32;
+            let right_rendered = (0.12 * right_sum / (1.0 + 0.2 * right_sum.abs())) as f32;
+            if !left_rendered.is_finite() || !right_rendered.is_finite() {
                 self.reset();
                 output.fill(0.0);
+                if let Some(channel) = right.as_deref_mut() {
+                    channel.fill(0.0);
+                }
                 return Err(BasicError::NonFiniteOutput);
             }
-            *sample = rendered;
+            *sample = if right.is_some() {
+                left_rendered
+            } else {
+                (left_rendered + right_rendered) * 0.5
+            };
+            if let Some(channel) = right.as_deref_mut() {
+                channel[offset] = right_rendered;
+            }
         }
         Ok(())
     }
@@ -217,6 +292,11 @@ impl BasicPianoEngine {
 
     pub fn reset(&mut self) {
         self.voices = [Voice::default(); MAX_VOICES];
+        self.sustain = false;
+        for mode in &mut self.body {
+            mode.current = 0.0;
+            mode.previous = 0.0;
+        }
     }
 
     fn apply(&mut self, event: PianoEventKind) {
@@ -228,10 +308,30 @@ impl BasicPianoEngine {
                     .iter_mut()
                     .find(|voice| voice.active && voice.note == note)
                 {
-                    voice.held = false;
+                    voice.key_down = false;
+                    voice.held = self.sustain;
+                }
+            }
+            PianoEventKind::Sustain { position } => {
+                self.sustain = position >= 0.5;
+                for voice in &mut self.voices {
+                    if voice.active {
+                        voice.held = voice.key_down || self.sustain;
+                    }
                 }
             }
             PianoEventKind::NoteOn { note, velocity } => {
+                if velocity == 0.0 {
+                    if let Some(voice) = self
+                        .voices
+                        .iter_mut()
+                        .find(|voice| voice.active && voice.note == note)
+                    {
+                        voice.key_down = false;
+                        voice.held = self.sustain;
+                    }
+                    return;
+                }
                 let index = self
                     .voices
                     .iter()
@@ -252,6 +352,7 @@ impl BasicPianoEngine {
                         note,
                         active: true,
                         held: true,
+                        key_down: true,
                         age: self.next_age,
                         count: self.keys[(note - FIRST_NOTE) as usize].count,
                         modes: self.keys[(note - FIRST_NOTE) as usize].modes,
@@ -260,10 +361,14 @@ impl BasicPianoEngine {
                 self.next_age = self.next_age.wrapping_add(1);
                 voice.age = self.next_age;
                 voice.held = true;
-                for (partial, mode) in voice.modes.iter_mut().take(voice.count).enumerate() {
+                voice.key_down = true;
+                let velocity = velocity as f64;
+                let mut spectral = velocity.powf(0.75);
+                let tilt = velocity.powf(0.12);
+                for mode in voice.modes.iter_mut().take(voice.count) {
                     // High partials gain proportionally more energy at greater velocity.
-                    mode.current +=
-                        mode.amplitude * (velocity as f64).powf(0.75 + partial as f64 * 0.12);
+                    mode.current += mode.amplitude * spectral;
+                    spectral *= tilt;
                 }
             }
         }

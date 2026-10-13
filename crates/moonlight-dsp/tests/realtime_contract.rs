@@ -130,9 +130,10 @@ fn analytic_polyphony_render_and_release_do_not_allocate_or_free() {
         },
     };
     let mut output = [0.0; 128];
+    let mut right = [0.0; 128];
     let watch = Watch::start();
-    let first = engine.process_block(0, &notes, &mut output);
-    let tail = engine.process_block(128, &[release], &mut output);
+    let first = engine.process_stereo_block(0, &notes, &mut output, &mut right);
+    let tail = engine.process_stereo_block(128, &[release], &mut output, &mut right);
     engine.reset();
     let counts = watch.finish();
     assert!(first.is_ok() && tail.is_ok());

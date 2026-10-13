@@ -18,6 +18,7 @@ fn main() {
         for frames in [64_usize, 128, 256, 512] {
             let mut engine = BasicPianoEngine::new(rate).unwrap();
             let mut output = vec![0.0_f32; frames];
+            let mut right = vec![0.0_f32; frames];
             let mut ratios = Vec::with_capacity(blocks);
             let mut checksum = 0.0_f64;
             for block in 0..blocks + 256 {
@@ -36,10 +37,13 @@ fn main() {
                     Vec::new()
                 };
                 let before = Instant::now();
-                engine.process_block(start, &events, &mut output).unwrap();
+                engine
+                    .process_stereo_block(start, &events, &mut output, &mut right)
+                    .unwrap();
                 let elapsed = before.elapsed().as_secs_f64();
                 black_box(&output);
-                checksum += output[frames / 2] as f64;
+                black_box(&right);
+                checksum += output[frames / 2] as f64 + right[frames / 2] as f64;
                 if block >= 256 {
                     ratios.push(elapsed * rate as f64 / frames as f64);
                 }

@@ -349,7 +349,7 @@ export function EngineLab() {
           <h2>踏板事件</h2>
           <label>
             Sustain {Math.round(pedals.sustain * 100)}%
-            <input type="range" min="0" max="1" step="0.01" disabled={selectedEngineId === "basic-piano" || selectedEngineId === "physical-c4"} value={pedals.sustain} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setPedal("sustain", Number(event.target.value))} />
+            <input type="range" min="0" max="1" step={selectedEngineId === "basic-piano" ? "1" : "0.01"} disabled={selectedEngineId === "physical-c4"} value={pedals.sustain} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setPedal("sustain", Number(event.target.value))} />
           </label>
           <label>
             Sostenuto {Math.round(pedals.sostenuto * 100)}%
@@ -360,11 +360,13 @@ export function EngineLab() {
             <input type="range" min="0" max="1" step="0.01" disabled={selectedEngineId === "basic-piano" || selectedEngineId === "physical-c4"} value={pedals.unaCorda} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setPedal("una-corda", Number(event.target.value))} />
           </label>
           <div className="dialog-actions">
-            <button type="button" disabled={selectedEngineId === "basic-piano" || selectedEngineId === "physical-c4"} onClick={() => setPedal("sustain", pedals.sustain >= 0.5 ? 0 : 1)}>切换延音</button>
-            <button type="button" disabled={selectedEngineId === "basic-piano" || selectedEngineId === "physical-c4"} onClick={() => {
+            <button type="button" disabled={selectedEngineId === "physical-c4"} onClick={() => setPedal("sustain", pedals.sustain >= 0.5 ? 0 : 1)}>切换延音</button>
+            <button type="button" disabled={selectedEngineId === "physical-c4"} onClick={() => {
               setPedal("sustain", 0);
-              setPedal("sostenuto", 0);
-              setPedal("una-corda", 0);
+              if (selectedEngineId !== "basic-piano") {
+                setPedal("sostenuto", 0);
+                setPedal("una-corda", 0);
+              }
             }}>释放全部</button>
           </div>
         </article>

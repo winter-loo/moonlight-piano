@@ -149,3 +149,44 @@ fn low_middle_and_high_keys_have_their_expected_fundamentals() {
         );
     }
 }
+
+#[test]
+fn binary_sustain_keeps_a_released_key_alive_then_damps_it() {
+    let mut engine = BasicPianoEngine::new(48_000).unwrap();
+    let mut output = vec![0.0_f32; 48_000];
+    let events = [
+        on(0, 60),
+        PianoEvent {
+            frame: 100,
+            kind: PianoEventKind::Sustain { position: 1.0 },
+        },
+        off(200, 60),
+    ];
+    for (block, chunk) in output.chunks_mut(256).enumerate() {
+        let start = (block * 256) as u64;
+        let first = events.partition_point(|event| event.frame < start);
+        let last = events.partition_point(|event| event.frame < start + chunk.len() as u64);
+        engine
+            .process_block(start, &events[first..last], chunk)
+            .unwrap();
+    }
+    let held_energy: f64 = output[44_000..]
+        .iter()
+        .map(|sample| (*sample as f64).powi(2))
+        .sum();
+    assert!(held_energy > 0.01);
+    let release = [PianoEvent {
+        frame: 48_000,
+        kind: PianoEventKind::Sustain { position: 0.0 },
+    }];
+    for (block, chunk) in output.chunks_mut(256).enumerate() {
+        let start = 48_000 + (block * 256) as u64;
+        let events = if block == 0 { &release[..] } else { &[] };
+        engine.process_block(start, events, chunk).unwrap();
+    }
+    let damped_energy: f64 = output[44_000..]
+        .iter()
+        .map(|sample| (*sample as f64).powi(2))
+        .sum();
+    assert!(damped_energy < held_energy * 0.01);
+}

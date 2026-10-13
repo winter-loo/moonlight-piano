@@ -30,8 +30,9 @@ test("analytic 88-key WASM renders chords through the actual AudioWorklet proces
   assert.equal(typeof Processor, "function");
   const bytes = wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength);
   const processor = new Processor({ processorOptions: { wasmBytes: bytes, mode: "basic" } });
-  for (let attempt = 0; attempt < 100 && !processor.ready; attempt++) {
-    await new Promise((resolve) => setImmediate(resolve));
+  const deadline = Date.now() + 2000;
+  while (!processor.ready && !processor.failed && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.equal(processor.ready, true, JSON.stringify(notices));
 
@@ -39,27 +40,33 @@ test("analytic 88-key WASM renders chords through the actual AudioWorklet proces
     processor.port.onmessage({ data: { type: "event", frame: 17, kind: 1, note, value: 0.8 } });
   }
   const channel = new Float32Array(128);
-  processor.process([], [[channel]]);
+  const right = new Float32Array(128);
+  processor.process([], [[channel, right]]);
   assert.ok(channel.subarray(0, 17).every((sample) => sample === 0));
   assert.ok(channel.subarray(17).some((sample) => sample !== 0));
   assert.ok(channel.every(Number.isFinite));
+  assert.ok(right.every(Number.isFinite));
+  assert.ok(channel.some((sample, index) => sample !== right[index]));
 
   scope.currentFrame = 128;
   processor.port.onmessage({ data: { type: "reset", frame: 128 } });
   channel.fill(1);
-  processor.process([], [[channel]]);
+  right.fill(1);
+  processor.process([], [[channel, right]]);
   assert.ok(channel.every((sample) => sample === 0));
+  assert.ok(right.every((sample) => sample === 0));
 
   scope.currentFrame = 256;
   processor.port.onmessage({ data: { type: "event", frame: 256, kind: 1, note: 60, value: 0.8 } });
-  processor.process([], [[channel]]);
+  processor.process([], [[channel, right]]);
   assert.ok(channel.some((sample) => sample !== 0));
   for (let index = 0; index < 256; index++) {
     processor.port.onmessage({ data: { type: "event", frame: 20_000 + index, kind: 1, note: 60, value: 0.8 } });
   }
-  processor.port.onmessage({ data: { type: "event", frame: 384, kind: 2, note: 60, value: 0.5 } });
+  // A far-future release must still force a reset on the next quantum.
+  processor.port.onmessage({ data: { type: "event", frame: 20_500, kind: 2, note: 60, value: 0.5 } });
   scope.currentFrame = 384;
-  processor.process([], [[channel]]);
+  processor.process([], [[channel, right]]);
   assert.ok(channel.every((sample) => sample === 0));
   assert.equal(processor.overflowEvents, 1);
 });

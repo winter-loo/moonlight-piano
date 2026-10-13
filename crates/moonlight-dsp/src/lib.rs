@@ -23,6 +23,7 @@ pub enum ProcessError {
     EventsOutOfOrder,
     UnsupportedNote(u8),
     InvalidVelocity,
+    UnsupportedControl,
     NonFiniteOutput,
 }
 
@@ -44,6 +45,7 @@ impl From<RenderError> for ProcessError {
             RenderError::EventsOutOfOrder => Self::EventsOutOfOrder,
             RenderError::UnsupportedNote(note) => Self::UnsupportedNote(note),
             RenderError::InvalidVelocity => Self::InvalidVelocity,
+            RenderError::UnsupportedControl => Self::UnsupportedControl,
             RenderError::NonFiniteOutput => Self::NonFiniteOutput,
         }
     }

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { createBrowserSoundEngine } from "@/lib/audio/engine-registry";
+import { createBrowserSoundEngine, type BrowserSoundEngineId } from "@/lib/audio/engine-registry";
 import { NOW, type SoundEngine } from "@/lib/audio/sound-engine";
 
 type Hand = "左手" | "右手";
@@ -127,6 +127,8 @@ function shortcutLabel(code?: string) {
 
 export function PlayablePiano({ hand, onActivity }: PlayablePianoProps) {
   const [activeNotes, setActiveNotes] = useState<Set<string>>(() => new Set());
+  const [engineId, setEngineId] = useState<BrowserSoundEngineId>("legacy-interactive-piano");
+  const [audioError, setAudioError] = useState<string | null>(null);
   const engineRef = useRef<SoundEngine | null>(null);
   const voicesRef = useRef<Map<string, { noteId: string; midi: number }>>(new Map());
   const heldCodesRef = useRef<Set<string>>(new Set());
@@ -142,48 +144,6 @@ export function PlayablePiano({ hand, onActivity }: PlayablePianoProps) {
     return result;
   }, [noteMap]);
 
-  const getEngine = useCallback(() => {
-    if (!engineRef.current) {
-      engineRef.current = createBrowserSoundEngine("legacy-interactive-piano");
-    }
-    return engineRef.current;
-  }, []);
-
-  const startNote = useCallback((note: NoteDefinition, source: string) => {
-    if (voicesRef.current.has(source)) return;
-    if (note.octave === 0 && !["A", "A#", "B"].includes(note.name)) return;
-    if (note.octave === 8 && note.name !== "C") return;
-
-    const engine = getEngine();
-    void engine.start();
-    engine.dispatch({
-      type: "note-on",
-      sourceId: source,
-      note: midiNumber(note),
-      velocity: 0.8,
-      gain: 1,
-      time: NOW,
-    });
-    const id = noteId(note);
-    voicesRef.current.set(source, { noteId: id, midi: midiNumber(note) });
-    setActiveNotes((current) => new Set(current).add(id));
-    onActivity?.(`${hand}：${note.name}${note.octave}`);
-  }, [getEngine, hand, onActivity]);
-
-  const stopSource = useCallback((source: string) => {
-    const voice = voicesRef.current.get(source);
-    if (!voice) return;
-    getEngine().dispatch({
-      type: "note-off",
-      sourceId: source,
-      note: voice.midi,
-      releaseVelocity: 0.5,
-      time: NOW,
-    });
-    voicesRef.current.delete(source);
-    setActiveNotes(new Set([...voicesRef.current.values()].map((value) => value.noteId)));
-  }, [getEngine]);
-
   const stopAll = useCallback(() => {
     engineRef.current?.stopAll(NOW);
     voicesRef.current.clear();
@@ -192,6 +152,64 @@ export function PlayablePiano({ hand, onActivity }: PlayablePianoProps) {
     pointerSourcesRef.current.clear();
     setActiveNotes(new Set());
   }, []);
+
+  const getEngine = useCallback(() => {
+    if (!engineRef.current) {
+      engineRef.current = createBrowserSoundEngine(engineId);
+    }
+    return engineRef.current;
+  }, [engineId]);
+
+  const startNote = useCallback((note: NoteDefinition, source: string) => {
+    if (voicesRef.current.has(source)) return;
+    if (note.octave === 0 && !["A", "A#", "B"].includes(note.name)) return;
+    if (note.octave === 8 && note.name !== "C") return;
+
+    const id = noteId(note);
+    const voice = { noteId: id, midi: midiNumber(note) };
+    voicesRef.current.set(source, voice);
+    setActiveNotes((current) => new Set(current).add(id));
+    const engine = getEngine();
+    void engine.start().then(() => {
+      if (engineRef.current !== engine || voicesRef.current.get(source) !== voice) return;
+      engine.dispatch({
+        type: "note-on", sourceId: source, note: midiNumber(note),
+        velocity: 0.8, gain: 1, time: NOW,
+      });
+    }).catch((error: unknown) => {
+      if (engineRef.current !== engine) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setAudioError(engineId === "basic-piano"
+        ? `Rust 音色不可用：${message}。已切回当前课程音色。`
+        : `音频引擎不可用：${message}`);
+      stopAll();
+      void engine.dispose();
+      engineRef.current = null;
+      if (engineId === "basic-piano") setEngineId("legacy-interactive-piano");
+    });
+    onActivity?.(`${hand}：${note.name}${note.octave}`);
+  }, [engineId, getEngine, hand, onActivity, stopAll]);
+
+  const stopSource = useCallback((source: string) => {
+    const voice = voicesRef.current.get(source);
+    if (!voice) return;
+    const engine = engineRef.current;
+    if (engine?.snapshot().ready) engine.dispatch({
+      type: "note-off", sourceId: source, note: voice.midi,
+      releaseVelocity: 0.5, time: NOW,
+    });
+    voicesRef.current.delete(source);
+    setActiveNotes(new Set([...voicesRef.current.values()].map((value) => value.noteId)));
+  }, []);
+
+  const selectEngine = useCallback((id: BrowserSoundEngineId) => {
+    stopAll();
+    const old = engineRef.current;
+    engineRef.current = null;
+    void old?.dispose();
+    setAudioError(null);
+    setEngineId(id);
+  }, [stopAll]);
 
   useEffect(() => {
     function isTypingTarget(target: EventTarget | null) {
@@ -259,7 +277,13 @@ export function PlayablePiano({ hand, onActivity }: PlayablePianoProps) {
     <div className="playable-piano" aria-label={`${hand}钢琴键盘`}>
       <p className="keyboard-shortcut-hint" aria-live="polite">
         <span>{hand}快捷键</span>
-        {hand === "右手" ? "N I O P [ ] \\ · 黑键 J 9 0 - =" : "Q W E R 空格 V B · 黑键 2 3 4 5 C"}
+        <span title={audioError ?? undefined}>{audioError ? (audioError.includes("已切回") ? "Rust 不可用，已切回课程" : "音频暂不可用") : hand === "右手" ? "N I O P [ ] \\ · 黑键 J 9 0 - =" : "Q W E R 空格 V B · 黑键 2 3 4 5 C"}</span>
+        <label className="piano-engine-option">音色
+          <select value={engineId} onChange={(event) => selectEngine(event.target.value as BrowserSoundEngineId)}>
+            <option value="legacy-interactive-piano">课程</option>
+            <option value="basic-piano">Rust 基础</option>
+          </select>
+        </label>
       </p>
       <div className="keyboard-surface">
         <img src="/assets/reference-keyboard.png" alt="" aria-hidden="true" draggable={false} />

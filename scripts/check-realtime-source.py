@@ -15,7 +15,7 @@ if actual != expected:
     raise SystemExit('Realtime source set changed: update audited closure deliberately')
 # The thin public wrapper is part of the contract too. A change requires a
 # fresh explicit audit, not merely scanning the inner numeric loop.
-expected_wrapper_sha256 = 'af71243129c75946ecc38c7d5060b4fb1d02c25ebfffd0e531cbf0f816c69094'
+expected_wrapper_sha256 = '9db68127d1ad832206dd44e62cf4554fb8c337962c970600aa17691a04dd43cc'
 if hashlib.sha256((source/'lib.rs').read_bytes()).hexdigest() != expected_wrapper_sha256:
     raise SystemExit('Public render wrapper changed: re-audit call closure and allocation/error paths')
 for filename in ('realtime.rs', 'basic.rs'):

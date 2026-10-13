@@ -30,6 +30,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
   private readonly mode: "c4" | "basic";
   private readonly sources = new Map<string, number>();
   private readonly pressed = new Map<number, number>();
+  private sustain = 0;
   private node: AudioWorkletNode | null = null;
   private master: GainNode | null = null;
   private stateValue: SoundEngineState = "idle";
@@ -113,6 +114,8 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       if (event.type === "note-on" || event.type === "note-off") {
         if (this.mode === "c4" && event.note !== 60) throw new RangeError("The physical tracer currently supports C4 (MIDI 60) only.");
         if (this.mode === "basic" && (event.note < 21 || event.note > 108)) throw new RangeError("The basic piano supports MIDI 21–108.");
+      } else if (event.type === "sustain" && this.mode === "basic") {
+        // The current basic model has a binary damper: positions below 0.5 are up.
       } else if (event.type === "sustain" || event.type === "sostenuto" || event.type === "una-corda") {
         throw new Error(`${event.type} is not yet supported by ${this.label}.`);
       }
@@ -120,6 +123,14 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
 
     for (const event of batch) {
       this.lastEventType = event.type;
+      if (event.type === "sustain") {
+        const frame = !event.time || event.time.kind === "now"
+          ? Math.max(Math.round(context.currentTime * context.sampleRate), clock.currentSampleFrame + leadFrames)
+          : Math.round(resolveEventTimeSeconds(event.time, clock) * context.sampleRate);
+        node.port.postMessage({ type: "event", frame, kind: 4, note: 0, value: event.position });
+        this.sustain = event.position >= 0.5 ? 1 : 0;
+        continue;
+      }
       if (event.type !== "note-on" && event.type !== "note-off") continue;
       if (this.mode === "basic") {
         if (event.type === "note-on") {
@@ -162,6 +173,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
     this.node.port.postMessage({ type: "reset", frame });
     this.sources.clear();
     this.pressed.clear();
+    this.sustain = 0;
     this.activeVoices = 0;
     this.emit();
   }
@@ -221,7 +233,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       ready: this.ready,
       profile: this.mode === "basic" ? "analytic-basic-piano-worklet" : "physical-c4-worklet",
       activeVoices: this.activeVoices,
-      pedals: { sustain: 0, sostenuto: 0, unaCorda: 0 },
+      pedals: { sustain: this.sustain, sostenuto: 0, unaCorda: 0 },
       parameters: {
         blockSize: this.telemetry.blockSize,
         renderDeadlineRatio: this.telemetry.deadlineRatio,
@@ -307,7 +319,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       const createdNode = new AudioWorkletNode(context, this.mode === "basic" ? "moonlight-basic-piano" : "moonlight-physical-c4", {
         numberOfInputs: 0,
         numberOfOutputs: 1,
-        outputChannelCount: [1],
+        outputChannelCount: [this.mode === "basic" ? 2 : 1],
         processorOptions: { wasmBytes, mode: this.mode },
       });
       const createdMaster = context.createGain();
