@@ -5,7 +5,9 @@ use std::fmt::{Display, Formatter};
 use moonlight_model::{ModelError, ModelPack};
 use moonlight_physics::modal_coefficients;
 
+mod basic;
 mod realtime;
+pub use basic::{BasicError, BasicPianoEngine, FIRST_NOTE, LAST_NOTE, MAX_VOICES};
 pub use realtime::{
     BlockReport, PianoEvent, PianoEventKind, MAX_BLOCK_FRAMES, MAX_EVENTS_PER_BLOCK,
 };

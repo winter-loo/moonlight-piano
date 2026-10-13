@@ -13,19 +13,23 @@ import {
 type Options = {
   context?: AudioContext;
   ownsContext?: boolean;
+  mode?: "c4" | "basic";
 };
 
 type WorkletMessage =
   | { type: "ready"; memoryBytes: number }
-  | { type: "telemetry"; blockSize: number; deadlineRatio: number; memoryBytes: number; underruns: number; lateEvents: number }
+  | { type: "telemetry"; blockSize: number; deadlineRatio: number; memoryBytes: number; underruns: number; lateEvents: number; overflowEvents: number; activeVoices: number }
   | { type: "error"; message: string };
 
 export class PhysicalC4WorkletEngine implements SoundEngine {
-  readonly id = "physical-c4";
-  readonly label = "Rust 物理 C4";
+  readonly id: string;
+  readonly label: string;
 
   private contextValue: AudioContext | null;
   private readonly ownsContext: boolean;
+  private readonly mode: "c4" | "basic";
+  private readonly sources = new Map<string, number>();
+  private readonly pressed = new Map<number, number>();
   private node: AudioWorkletNode | null = null;
   private master: GainNode | null = null;
   private stateValue: SoundEngineState = "idle";
@@ -37,9 +41,12 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
   private initializationPromise: Promise<void> | null = null;
   private rejectPendingInitialization: ((error: Error) => void) | null = null;
   private activeVoices = 0;
-  private telemetry = { blockSize: 0, deadlineRatio: 0, memoryBytes: 0, underruns: 0, lateEvents: 0 };
+  private telemetry = { blockSize: 0, deadlineRatio: 0, memoryBytes: 0, underruns: 0, lateEvents: 0, overflowEvents: 0 };
 
   constructor(options: Options = {}) {
+    this.mode = options.mode ?? "c4";
+    this.id = this.mode === "basic" ? "basic-piano" : "physical-c4";
+    this.label = this.mode === "basic" ? "Rust 基础全键盘" : "Rust 物理 C4";
     this.contextValue = options.context ?? null;
     this.ownsContext = options.ownsContext ?? options.context === undefined;
   }
@@ -103,9 +110,33 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
 
     for (const event of batch) {
       validateSoundEngineEvent(event);
+      if (event.type === "note-on" || event.type === "note-off") {
+        if (this.mode === "c4" && event.note !== 60) throw new RangeError("The physical tracer currently supports C4 (MIDI 60) only.");
+        if (this.mode === "basic" && (event.note < 21 || event.note > 108)) throw new RangeError("The basic piano supports MIDI 21–108.");
+      } else if (event.type === "sustain" || event.type === "sostenuto" || event.type === "una-corda") {
+        throw new Error(`${event.type} is not yet supported by ${this.label}.`);
+      }
+    }
+
+    for (const event of batch) {
       this.lastEventType = event.type;
       if (event.type !== "note-on" && event.type !== "note-off") continue;
-      if (event.note !== 60) throw new RangeError("The physical tracer currently supports C4 (MIDI 60) only.");
+      if (this.mode === "basic") {
+        if (event.type === "note-on") {
+          if (this.sources.has(event.sourceId)) continue;
+          this.sources.set(event.sourceId, event.note);
+          this.pressed.set(event.note, (this.pressed.get(event.note) ?? 0) + 1);
+        } else {
+          if (this.sources.get(event.sourceId) !== event.note) continue;
+          this.sources.delete(event.sourceId);
+          const remaining = (this.pressed.get(event.note) ?? 1) - 1;
+          if (remaining > 0) {
+            this.pressed.set(event.note, remaining);
+            continue;
+          }
+          this.pressed.delete(event.note);
+        }
+      }
       let frame = Math.round(resolveEventTimeSeconds(event.time, clock) * context.sampleRate);
       if (!event.time || event.time.kind === "now") {
         frame = Math.max(frame, clock.currentSampleFrame + leadFrames);
@@ -117,7 +148,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
         note: event.note,
         value: event.type === "note-on" ? event.velocity : event.releaseVelocity,
       });
-      this.activeVoices = event.type === "note-on" ? 1 : 0;
+      this.activeVoices = this.mode === "basic" ? this.pressed.size : event.type === "note-on" ? 1 : 0;
     }
     this.emit();
   }
@@ -129,6 +160,8 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       ? Math.round(resolveEventTimeSeconds(time, clock) * Math.max(clock.sampleRate, 1))
       : clock.currentSampleFrame + 128;
     this.node.port.postMessage({ type: "reset", frame });
+    this.sources.clear();
+    this.pressed.clear();
     this.activeVoices = 0;
     this.emit();
   }
@@ -186,7 +219,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       label: this.label,
       state: this.stateValue,
       ready: this.ready,
-      profile: "physical-c4-worklet",
+      profile: this.mode === "basic" ? "analytic-basic-piano-worklet" : "physical-c4-worklet",
       activeVoices: this.activeVoices,
       pedals: { sustain: 0, sostenuto: 0, unaCorda: 0 },
       parameters: {
@@ -195,6 +228,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
         wasmMemoryBytes: this.telemetry.memoryBytes,
         underruns: this.telemetry.underruns,
         lateEvents: this.telemetry.lateEvents,
+        overflowEvents: this.telemetry.overflowEvents,
       },
       clock: this.clock(),
       routeVersion: this.routeVersion,
@@ -270,11 +304,11 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       await waitFor(context.audioWorklet.addModule("/audio/physical-c4-worklet.js"));
       assertCurrent();
 
-      const createdNode = new AudioWorkletNode(context, "moonlight-physical-c4", {
+      const createdNode = new AudioWorkletNode(context, this.mode === "basic" ? "moonlight-basic-piano" : "moonlight-physical-c4", {
         numberOfInputs: 0,
         numberOfOutputs: 1,
         outputChannelCount: [1],
-        processorOptions: { wasmBytes },
+        processorOptions: { wasmBytes, mode: this.mode },
       });
       const createdMaster = context.createGain();
       node = createdNode;
@@ -339,6 +373,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
           if (message.type === "telemetry") {
             if (!isCurrentInitialization()) return;
             this.telemetry = message;
+            this.activeVoices = message.activeVoices;
             this.emit();
             return;
           }

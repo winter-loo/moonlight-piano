@@ -21,11 +21,17 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
     this.telemetryCountdown = 0;
     this.lastBlockSize = 0;
     this.lastDeadlineRatio = 0;
+    this.basic = options.processorOptions?.mode === "basic";
+    this.overflowEvents = 0;
 
     this.port.onmessage = (event) => {
       const message = event.data;
       if (message.type === "event") this.enqueue(message.frame, message.kind, message.note, message.value);
-      else if (message.type === "reset") this.enqueue(message.frame, 3, 60, 0);
+      else if (message.type === "reset") {
+        // A stop cancels previously scheduled notes, including future ones.
+        this.queueLength = 0;
+        this.enqueue(message.frame, 3, 60, 0);
+      }
     };
 
     const bytes = options.processorOptions && options.processorOptions.wasmBytes;
@@ -37,7 +43,9 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
       this.instance = instance;
       this.exports = instance.exports;
       this.memory = instance.exports.memory;
-      const status = this.exports.moonlight_engine_init(sampleRate, 0x243f6a88, 0x85a308d3);
+      const status = this.basic
+        ? this.exports.moonlight_basic_init(sampleRate)
+        : this.exports.moonlight_engine_init(sampleRate, 0x243f6a88, 0x85a308d3);
       if (status !== 0) {
         this.fail(`Rust engine initialization failed with status ${status}.`);
         return;
@@ -52,9 +60,18 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
   }
 
   enqueue(frame, kind, note, value) {
-    if (!Number.isSafeInteger(frame) || frame < 0 || this.queueLength >= this.queueCapacity) {
+    if (!Number.isSafeInteger(frame) || frame < 0) {
       this.lateEvents += 1;
       return;
+    }
+    if (this.queueLength >= this.queueCapacity) {
+      this.overflowEvents += 1;
+      if (kind === 1) return;
+      // Never lose a release or reset: silence the instrument at the next
+      // quantum when the host has filled the queue with unbounded future work.
+      this.queueLength = 0;
+      frame = Math.max(frame, currentFrame);
+      kind = 3;
     }
     let index = this.queueLength;
     while (index > 0 && this.frames[index - 1] > frame) {
@@ -134,6 +151,8 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
         memoryBytes: this.memory.buffer.byteLength,
         underruns: this.underruns,
         lateEvents: this.lateEvents,
+        overflowEvents: this.overflowEvents,
+        activeVoices: this.exports.moonlight_active_voices(),
       });
     }
     return true;
@@ -148,3 +167,4 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
 }
 
 registerProcessor("moonlight-physical-c4", MoonlightPhysicalC4Processor);
+registerProcessor("moonlight-basic-piano", MoonlightPhysicalC4Processor);

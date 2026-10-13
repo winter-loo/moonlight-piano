@@ -41,6 +41,9 @@ next-env.d.ts
 /outputs/
 /work/
 /tmp/
+/target/
+/Cargo.lock
+/public/audio/moonlight_wasm.wasm
 
 # python & tools cache
 __pycache__/

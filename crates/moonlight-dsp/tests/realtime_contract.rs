@@ -3,7 +3,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
 
-use moonlight_dsp::{PianoEngine, PianoEvent, PianoEventKind};
+use moonlight_dsp::{BasicPianoEngine, PianoEngine, PianoEvent, PianoEventKind};
 use moonlight_model::parse_model_pack;
 
 struct ObservedAllocator;
@@ -108,6 +108,35 @@ fn successful_and_rejected_renders_and_reset_do_not_allocate_or_free() {
         assert!(first.is_ok() && tail.is_ok() && invalid.is_err());
         assert_eq!(counts, (0, 0));
     }
+}
+
+#[test]
+fn analytic_polyphony_render_and_release_do_not_allocate_or_free() {
+    let mut engine = BasicPianoEngine::new(48_000).unwrap();
+    let notes: Vec<_> = (21..53)
+        .map(|note| PianoEvent {
+            frame: 0,
+            kind: PianoEventKind::NoteOn {
+                note,
+                velocity: 0.8,
+            },
+        })
+        .collect();
+    let release = PianoEvent {
+        frame: 128,
+        kind: PianoEventKind::NoteOff {
+            note: 21,
+            release_velocity: 0.5,
+        },
+    };
+    let mut output = [0.0; 128];
+    let watch = Watch::start();
+    let first = engine.process_block(0, &notes, &mut output);
+    let tail = engine.process_block(128, &[release], &mut output);
+    engine.reset();
+    let counts = watch.finish();
+    assert!(first.is_ok() && tail.is_ok());
+    assert_eq!(counts, (0, 0));
 }
 
 #[test]

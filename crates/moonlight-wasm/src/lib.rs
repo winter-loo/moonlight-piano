@@ -5,7 +5,8 @@
 use std::cell::RefCell;
 
 use moonlight_dsp::{
-    PianoEngine, PianoEvent, PianoEventKind, MAX_BLOCK_FRAMES, MAX_EVENTS_PER_BLOCK,
+    BasicPianoEngine, PianoEngine, PianoEvent, PianoEventKind, MAX_BLOCK_FRAMES,
+    MAX_EVENTS_PER_BLOCK,
 };
 use moonlight_model::parse_model_pack;
 
@@ -21,9 +22,14 @@ pub struct WasmEvent {
 }
 
 struct WasmEngine {
-    engine: PianoEngine,
+    engine: Core,
     events: [WasmEvent; MAX_EVENTS_PER_BLOCK],
     output: [f32; MAX_BLOCK_FRAMES],
+}
+
+enum Core {
+    C4(Box<PianoEngine>),
+    Basic(Box<BasicPianoEngine>),
 }
 
 thread_local! {
@@ -32,7 +38,7 @@ thread_local! {
 
 #[no_mangle]
 pub extern "C" fn moonlight_engine_abi_version() -> u32 {
-    2
+    3
 }
 
 #[no_mangle]
@@ -48,7 +54,23 @@ pub extern "C" fn moonlight_engine_init(sample_rate_hz: u32, seed_lo: u32, seed_
     };
     ENGINE.with(|slot| {
         *slot.borrow_mut() = Some(WasmEngine {
-            engine,
+            engine: Core::C4(Box::new(engine)),
+            events: [WasmEvent::default(); MAX_EVENTS_PER_BLOCK],
+            output: [0.0; MAX_BLOCK_FRAMES],
+        });
+    });
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn moonlight_basic_init(sample_rate_hz: u32) -> i32 {
+    let engine = match BasicPianoEngine::new(sample_rate_hz) {
+        Ok(engine) => engine,
+        Err(_) => return 2,
+    };
+    ENGINE.with(|slot| {
+        *slot.borrow_mut() = Some(WasmEngine {
+            engine: Core::Basic(Box::new(engine)),
             events: [WasmEvent::default(); MAX_EVENTS_PER_BLOCK],
             output: [0.0; MAX_BLOCK_FRAMES],
         });
@@ -71,6 +93,18 @@ pub extern "C" fn moonlight_output_buffer_ptr() -> *const f32 {
         let slot = slot.borrow();
         slot.as_ref()
             .map_or(std::ptr::null(), |state| state.output.as_ptr())
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn moonlight_active_voices() -> u32 {
+    ENGINE.with(|slot| {
+        let slot = slot.borrow();
+        match slot.as_ref().map(|state| &state.engine) {
+            Some(Core::C4(engine)) => engine.state_counts().active_strings as u32,
+            Some(Core::Basic(engine)) => engine.active_voices() as u32,
+            None => 0,
+        }
     })
 }
 
@@ -129,15 +163,19 @@ pub extern "C" fn moonlight_process_block(
         }
 
         let output = &mut state.output[..frame_count as usize];
-        match state
-            .engine
-            .process_block(block_start, &events[..event_count as usize], output)
-        {
-            Ok(_) => 0,
-            Err(_) => {
-                output.fill(0.0);
-                8
-            }
+        let okay = match &mut state.engine {
+            Core::C4(engine) => engine
+                .process_block(block_start, &events[..event_count as usize], output)
+                .is_ok(),
+            Core::Basic(engine) => engine
+                .process_block(block_start, &events[..event_count as usize], output)
+                .is_ok(),
+        };
+        if okay {
+            0
+        } else {
+            output.fill(0.0);
+            8
         }
     })
 }
@@ -168,7 +206,9 @@ mod tests {
             .unwrap();
 
         let mut wrapped = WasmEngine {
-            engine: PianoEngine::new(&pack, sample_rate, 0x85a308d3243f6a88).unwrap(),
+            engine: Core::C4(Box::new(
+                PianoEngine::new(&pack, sample_rate, 0x85a308d3243f6a88).unwrap(),
+            )),
             events: [WasmEvent::default(); MAX_EVENTS_PER_BLOCK],
             output: [0.0; MAX_BLOCK_FRAMES],
         };
@@ -186,10 +226,11 @@ mod tests {
                 velocity: event.value,
             },
         }];
-        wrapped
-            .engine
-            .process_block(0, &events, &mut wrapped.output[..128])
-            .unwrap();
+        if let Core::C4(engine) = &mut wrapped.engine {
+            engine
+                .process_block(0, &events, &mut wrapped.output[..128])
+                .unwrap();
+        }
 
         assert_eq!(&wrapped.output[..128], &direct_output);
     }

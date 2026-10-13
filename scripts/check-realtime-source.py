@@ -9,22 +9,23 @@ import re
 
 root = pathlib.Path(__file__).resolve().parents[1]
 source = root / 'crates/moonlight-dsp/src'
-expected = {'lib.rs', 'realtime.rs'}
+expected = {'lib.rs', 'realtime.rs', 'basic.rs'}
 actual = {str(p.relative_to(source)) for p in source.rglob('*.rs')}
 if actual != expected:
     raise SystemExit('Realtime source set changed: update audited closure deliberately')
 # The thin public wrapper is part of the contract too. A change requires a
 # fresh explicit audit, not merely scanning the inner numeric loop.
-expected_wrapper_sha256 = '8f3f8eff50ead1ad745f5701859af116d7393b820860218143145d46478cea22'
+expected_wrapper_sha256 = 'af71243129c75946ecc38c7d5060b4fb1d02c25ebfffd0e531cbf0f816c69094'
 if hashlib.sha256((source/'lib.rs').read_bytes()).hexdigest() != expected_wrapper_sha256:
     raise SystemExit('Public render wrapper changed: re-audit call closure and allocation/error paths')
-text = (source / 'realtime.rs').read_text()
-text = re.sub(r'//[^\n]*', '', text)
-for forbidden in [r'\b(?:std|alloc)\s*::', r'\bunsafe\b', r'\bextern\b',
-                  r'\b(?:include|include_str|include_bytes|panic|assert|assert_eq|todo|unimplemented)\s*!',
-                  r'\b(?:unwrap|expect)\s*\(', r'\bloop\s*\{',
-                  r'\b(?:Mutex|RwLock|Vec|Box|String|VecDeque)\b',
-                  r'\b(?:print|println|eprint|eprintln|dbg)\s*!']:
-    if re.search(forbidden, text):
-        raise SystemExit(f'Forbidden realtime construct: {forbidden}')
-print('Production realtime source policy checked; compile/link audit is separate')
+for filename in ('realtime.rs', 'basic.rs'):
+    text = (source / filename).read_text()
+    text = re.sub(r'//[^\n]*', '', text)
+    for forbidden in [r'\b(?:std|alloc)\s*::', r'\bunsafe\b', r'\bextern\b',
+                      r'\b(?:include|include_str|include_bytes|panic|assert|assert_eq|todo|unimplemented)\s*!',
+                      r'\b(?:unwrap|expect)\s*\(', r'\bloop\s*\{',
+                      r'\b(?:Mutex|RwLock|Vec|Box|String|VecDeque)\b',
+                      r'\b(?:print|println|eprint|eprintln|dbg)\s*!']:
+        if re.search(forbidden, text):
+            raise SystemExit(f'Forbidden realtime construct in {filename}: {forbidden}')
+print('Production realtime source policy checked; C4 compiled-object audit is separate')
