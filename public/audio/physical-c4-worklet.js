@@ -17,6 +17,7 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
     this.kinds = new Uint8Array(this.queueCapacity);
     this.notes = new Uint8Array(this.queueCapacity);
     this.values = new Float32Array(this.queueCapacity);
+    this.immediate = new Uint8Array(this.queueCapacity);
     this.underruns = 0;
     this.lateEvents = 0;
     this.telemetryCountdown = 0;
@@ -27,7 +28,7 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
 
     this.port.onmessage = (event) => {
       const message = event.data;
-      if (message.type === "event") this.enqueue(message.frame, message.kind, message.note, message.value);
+      if (message.type === "event") this.enqueue(message.frame, message.kind, message.note, message.value, message.immediate === true);
       else if (message.type === "reset") {
         // A stop cancels previously scheduled notes, including future ones.
         this.queueLength = 0;
@@ -61,7 +62,7 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
     }).catch((error) => this.fail(error instanceof Error ? error.message : String(error)));
   }
 
-  enqueue(frame, kind, note, value) {
+  enqueue(frame, kind, note, value, immediate = false) {
     if (!Number.isSafeInteger(frame) || frame < 0) {
       this.lateEvents += 1;
       return;
@@ -81,12 +82,14 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
       this.kinds[index] = this.kinds[index - 1];
       this.notes[index] = this.notes[index - 1];
       this.values[index] = this.values[index - 1];
+      this.immediate[index] = this.immediate[index - 1];
       index -= 1;
     }
     this.frames[index] = frame;
     this.kinds[index] = kind;
     this.notes[index] = note;
     this.values[index] = value;
+    this.immediate[index] = immediate ? 1 : 0;
     this.queueLength += 1;
   }
 
@@ -110,11 +113,11 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
       let frame = this.frames[consumed];
       if (frame < blockStart) {
         this.lateEvents += 1;
-        if (this.kinds[consumed] === 1) {
+        if (this.kinds[consumed] === 1 && !this.immediate[consumed]) {
           consumed += 1;
           continue;
         }
-        // A late release, pedal lift, or reset must still reach the core.
+        // Deliver NOW inputs and safety controls even if message delivery was late.
         frame = blockStart;
       }
       const base = this.eventPtr + eventCount * 16;
@@ -130,6 +133,7 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
       this.kinds.copyWithin(0, consumed, this.queueLength);
       this.notes.copyWithin(0, consumed, this.queueLength);
       this.values.copyWithin(0, consumed, this.queueLength);
+      this.immediate.copyWithin(0, consumed, this.queueLength);
       this.queueLength -= consumed;
     }
 

@@ -25,6 +25,8 @@ one source releasing a shared key does not release the other source. When the
 Worklet event queue overflows, new note-ons are dropped; a release forces a
 safe reset rather than leaving an indefinitely held note. Queue overflows are
 counted separately from late events. Stop-all clears queued future events.
+Late absolute note-ons expire; late `NOW` inputs play at the next render block
+so context resume or message latency cannot silently discard the first key.
 
 The two output channels use a simple key-position pan and two persistent,
 shared body modes. This is basic coloration rather than identified soundboard

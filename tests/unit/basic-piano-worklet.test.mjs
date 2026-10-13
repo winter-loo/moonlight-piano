@@ -69,4 +69,14 @@ test("analytic 88-key WASM renders chords through the actual AudioWorklet proces
   processor.process([], [[channel, right]]);
   assert.ok(channel.every((sample) => sample === 0));
   assert.equal(processor.overflowEvents, 1);
+
+  // Late absolute onsets expire, but a NOW input must survive resume/message latency.
+  scope.currentFrame = 512;
+  processor.port.onmessage({ data: { type: "event", frame: 384, kind: 1, note: 60, value: 0.8 } });
+  processor.process([], [[channel, right]]);
+  assert.ok(channel.every((sample) => sample === 0));
+  scope.currentFrame = 640;
+  processor.port.onmessage({ data: { type: "event", frame: 512, kind: 1, note: 60, value: 0.8, immediate: true } });
+  processor.process([], [[channel, right]]);
+  assert.ok(channel.some((sample) => sample !== 0));
 });

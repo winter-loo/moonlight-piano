@@ -158,6 +158,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
         kind: event.type === "note-on" ? 1 : 2,
         note: event.note,
         value: event.type === "note-on" ? event.velocity : event.releaseVelocity,
+        immediate: !event.time || event.time.kind === "now",
       });
       this.activeVoices = this.mode === "basic" ? this.pressed.size : event.type === "note-on" ? 1 : 0;
     }
