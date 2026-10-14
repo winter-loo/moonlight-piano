@@ -20,8 +20,11 @@ No audio samples enter the runtime.
 
 The current capacity is **32 sounding key states**, not 32 strings or 32
 independent same-pitch instances. A new note first reuses a released tail;
-otherwise it replaces the oldest held key. The browser tracks source IDs so
-one source releasing a shared key does not release the other source. When the
+otherwise it replaces the oldest held key. The Worklet tracks up to **256 held
+source IDs** at their scheduled sample frames, so overlapping scheduled or live
+sources share a key until the final source releases it. Duplicate source onsets
+and unmatched releases are ignored. At the source limit, new onsets are dropped
+and counted as overflows; accepted holds remain releasable. When the
 Worklet event queue overflows, new note-ons are dropped; a release forces a
 safe reset rather than leaving an indefinitely held note. Queue overflows are
 counted separately from late events. Stop-all clears queued future events.
@@ -42,7 +45,7 @@ the corresponding physical engine.
 cargo test --workspace
 sh scripts/check-realtime-boundary.sh
 npm run audio:wasm
-node --test tests/unit/basic-piano-worklet.test.mjs
+node --experimental-strip-types --test tests/unit/basic-piano-worklet.test.mjs tests/unit/basic-piano-source-ownership.test.mjs
 npx tsc -p tsconfig.audio-worklet.json --noEmit
 cargo run --release -p moonlight-dsp --example basic_smoke -- 2048
 ```

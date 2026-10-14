@@ -18,6 +18,13 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
     this.notes = new Uint8Array(this.queueCapacity);
     this.values = new Float32Array(this.queueCapacity);
     this.immediate = new Uint8Array(this.queueCapacity);
+    this.sourceIds = new Array(this.queueCapacity).fill(null);
+    // Source ownership follows sorted render events, never message dispatch.
+    // Fixed slots bound work and avoid Map growth/allocation in process().
+    this.sourceCapacity = 256;
+    this.heldSourceIds = new Array(this.sourceCapacity).fill(null);
+    this.heldNotes = new Uint8Array(this.sourceCapacity);
+    this.pressed = new Uint16Array(128);
     this.underruns = 0;
     this.lateEvents = 0;
     this.telemetryCountdown = 0;
@@ -28,9 +35,10 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
 
     this.port.onmessage = (event) => {
       const message = event.data;
-      if (message.type === "event") this.enqueue(message.frame, message.kind, message.note, message.value, message.immediate === true);
+      if (message.type === "event") this.enqueue(message.frame, message.kind, message.note, message.value, message.immediate === true, message.sourceId);
       else if (message.type === "reset") {
         // A stop cancels previously scheduled notes, including future ones.
+        this.sourceIds.fill(null);
         this.queueLength = 0;
         this.enqueue(message.frame, 3, 60, 0);
       }
@@ -62,7 +70,7 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
     }).catch((error) => this.fail(error instanceof Error ? error.message : String(error)));
   }
 
-  enqueue(frame, kind, note, value, immediate = false) {
+  enqueue(frame, kind, note, value, immediate = false, sourceId = null) {
     if (!Number.isSafeInteger(frame) || frame < 0) {
       this.lateEvents += 1;
       return;
@@ -72,6 +80,7 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
       if (kind === 1) return;
       // Never lose a release or reset: silence the instrument at the next
       // quantum when the host has filled the queue with unbounded future work.
+      this.sourceIds.fill(null);
       this.queueLength = 0;
       frame = currentFrame;
       kind = 3;
@@ -83,6 +92,7 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
       this.notes[index] = this.notes[index - 1];
       this.values[index] = this.values[index - 1];
       this.immediate[index] = this.immediate[index - 1];
+      this.sourceIds[index] = this.sourceIds[index - 1];
       index -= 1;
     }
     this.frames[index] = frame;
@@ -90,6 +100,7 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
     this.notes[index] = note;
     this.values[index] = value;
     this.immediate[index] = immediate ? 1 : 0;
+    this.sourceIds[index] = sourceId;
     this.queueLength += 1;
   }
 
@@ -105,6 +116,8 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
       return !this.failed;
     }
 
+    // Include bounded JS event/ownership work in the render deadline metric.
+    const start = globalThis.performance ? performance.now() : 0;
     const blockStart = currentFrame;
     const blockEnd = blockStart + frames;
     let eventCount = 0;
@@ -120,6 +133,44 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
         // Deliver NOW inputs and safety controls even if message delivery was late.
         frame = blockStart;
       }
+      const kind = this.kinds[consumed];
+      const note = this.notes[consumed];
+      const sourceId = this.sourceIds[consumed];
+      if (this.basic && kind === 3) {
+        this.heldSourceIds.fill(null);
+        this.pressed.fill(0);
+      } else if (this.basic && (kind === 1 || kind === 2) && sourceId !== null) {
+        let held = -1;
+        let available = -1;
+        for (let slot = 0; slot < this.sourceCapacity; slot += 1) {
+          if (this.heldSourceIds[slot] === sourceId) {
+            held = slot;
+            break;
+          }
+          if (available < 0 && this.heldSourceIds[slot] === null) available = slot;
+        }
+        if (kind === 1) {
+          if (held >= 0 || available < 0) {
+            if (held < 0) this.overflowEvents += 1;
+            consumed += 1;
+            continue;
+          }
+          this.heldSourceIds[available] = sourceId;
+          this.heldNotes[available] = note;
+          this.pressed[note] += 1;
+        } else {
+          if (held < 0 || this.heldNotes[held] !== note) {
+            consumed += 1;
+            continue;
+          }
+          this.heldSourceIds[held] = null;
+          this.pressed[note] -= 1;
+          if (this.pressed[note] > 0) {
+            consumed += 1;
+            continue;
+          }
+        }
+      }
       const base = this.eventPtr + eventCount * 16;
       this.eventView.setUint32(base, frame - blockStart, true);
       this.eventView.setUint32(base + 4, this.kinds[consumed], true);
@@ -134,10 +185,11 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
       this.notes.copyWithin(0, consumed, this.queueLength);
       this.values.copyWithin(0, consumed, this.queueLength);
       this.immediate.copyWithin(0, consumed, this.queueLength);
+      this.sourceIds.copyWithin(0, consumed, this.queueLength);
+      this.sourceIds.fill(null, this.queueLength - consumed, this.queueLength);
       this.queueLength -= consumed;
     }
 
-    const start = globalThis.performance ? performance.now() : 0;
     const lo = blockStart >>> 0;
     const hi = Math.floor(blockStart / 4294967296) >>> 0;
     const status = this.exports.moonlight_process_block(lo, hi, frames, eventCount);

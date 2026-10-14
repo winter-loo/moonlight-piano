@@ -28,8 +28,6 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
   private contextValue: AudioContext | null;
   private readonly ownsContext: boolean;
   private readonly mode: "c4" | "basic";
-  private readonly sources = new Map<string, number>();
-  private readonly pressed = new Map<number, number>();
   private sustain = 0;
   private node: AudioWorkletNode | null = null;
   private master: GainNode | null = null;
@@ -132,22 +130,6 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
         continue;
       }
       if (event.type !== "note-on" && event.type !== "note-off") continue;
-      if (this.mode === "basic") {
-        if (event.type === "note-on") {
-          if (this.sources.has(event.sourceId)) continue;
-          this.sources.set(event.sourceId, event.note);
-          this.pressed.set(event.note, (this.pressed.get(event.note) ?? 0) + 1);
-        } else {
-          if (this.sources.get(event.sourceId) !== event.note) continue;
-          this.sources.delete(event.sourceId);
-          const remaining = (this.pressed.get(event.note) ?? 1) - 1;
-          if (remaining > 0) {
-            this.pressed.set(event.note, remaining);
-            continue;
-          }
-          this.pressed.delete(event.note);
-        }
-      }
       let frame = Math.round(resolveEventTimeSeconds(event.time, clock) * context.sampleRate);
       if (!event.time || event.time.kind === "now") {
         frame = Math.max(frame, clock.currentSampleFrame + leadFrames);
@@ -157,10 +139,13 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
         frame,
         kind: event.type === "note-on" ? 1 : 2,
         note: event.note,
+        sourceId: event.sourceId,
         value: event.type === "note-on" ? event.velocity : event.releaseVelocity,
         immediate: !event.time || event.time.kind === "now",
       });
-      this.activeVoices = this.mode === "basic" ? this.pressed.size : event.type === "note-on" ? 1 : 0;
+      // Basic-piano holds belong to the render timeline; its telemetry reports
+      // sounding voices instead of speculating from future dispatched events.
+      if (this.mode === "c4") this.activeVoices = event.type === "note-on" ? 1 : 0;
     }
     this.emit();
   }
@@ -172,8 +157,6 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       ? Math.round(resolveEventTimeSeconds(time, clock) * Math.max(clock.sampleRate, 1))
       : clock.currentSampleFrame + 128;
     this.node.port.postMessage({ type: "reset", frame });
-    this.sources.clear();
-    this.pressed.clear();
     this.sustain = 0;
     this.activeVoices = 0;
     this.emit();
