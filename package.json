@@ -7,10 +7,11 @@
   },
   "scripts": {
     "dev": "node scripts/run-vinext.mjs dev",
-    "build": "node scripts/run-vinext.mjs build",
+    "build": "npm run audio:wasm && node scripts/run-vinext.mjs build",
     "start": "node scripts/run-vinext.mjs start",
     "test": "node --experimental-strip-types --test tests/unit/*.test.mjs",
-    "test:all": "npm run test && npm run build",
+    "test:build": "node --test tests/build/production-audio.test.mjs",
+    "test:all": "npm run test:build && npm run test",
     "visual:diff": "node scripts/visual-diff.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",

@@ -36,11 +36,15 @@ yarn-error.log*
 
 # typescript
 next-env.d.ts
+*.tsbuildinfo
 /dist/
 /.wrangler/
 /outputs/
 /work/
 /tmp/
+/target/
+/Cargo.lock
+/public/audio/moonlight_wasm.wasm
 
 # python & tools cache
 __pycache__/

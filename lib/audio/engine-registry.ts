@@ -4,6 +4,14 @@ import type { SoundEngine } from "./sound-engine.ts";
 
 export const BROWSER_SOUND_ENGINES = [
   {
+    id: "basic-piano",
+    label: "Rust 基础全键盘",
+    description: "分析式参数的 88 键、最多 32 个同时发声的按键；音质和踏板仍在开发。",
+    kind: "physical" as const,
+    profile: "basic-piano",
+    labLevel: 1.0,
+  },
+  {
     id: "physical-c4",
     label: "Rust 物理 C4",
     description: "与离线 renderer 共用 Rust 物理状态；WASM 在 AudioWorklet 内按 block 渲染。",
@@ -50,7 +58,7 @@ export function createBrowserSoundEngine(
 ): SoundEngine {
   const descriptor = getBrowserSoundEngineDescriptor(id);
   if (descriptor.kind === "physical") {
-    return new PhysicalC4WorkletEngine(options);
+    return new PhysicalC4WorkletEngine({ ...options, mode: id === "basic-piano" ? "basic" : "c4" });
   }
   return new LegacyWebAudioEngine({
     id: descriptor.id,

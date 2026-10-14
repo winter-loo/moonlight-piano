@@ -25,14 +25,30 @@
 - Bravura 开源音乐字体用于谱号与音乐符号
 - 结构化课程内容、节奏评分与 Transport 独立于界面组件
 
-运行要求：Node.js `>=22.13.0`。
+运行要求：Node.js `>=22.13.0`，以及通过 rustup 安装的 Rust `1.82.0` 和
+`wasm32-unknown-unknown` 目标（版本见 `rust-toolchain.toml`）。
 
 ```bash
 npm install
+rustup show active-toolchain
+npm run audio:wasm
 npm run dev
 ```
 
 浏览器首次播放声音必须由用户点击触发，这是 iPad Safari 和 Chrome 的 Web Audio 安全限制。
+
+### 生产构建与部署
+
+```bash
+npm ci
+npm run build
+```
+
+`npm run build` 会先编译 Rust 音频引擎，生成
+`public/audio/moonlight_wasm.wasm`，再运行 Vinext/Vite 构建。编译失败会立即终止，
+不会跳过音频引擎继续打包。WASM 是生成产物，不提交到 Git；部署构建环境也必须提供
+上述 Rust 工具链及 WASM 目标，不能仅安装 Node.js。部署已构建的产物时，运行环境
+不需要 Rust，但必须保留 `dist/client/audio/` 中的 WASM 和 worklet 文件。
 
 ## 质量检查
 
@@ -42,7 +58,11 @@ npm test
 npm run build
 ```
 
-`npm run test:all` 会依次运行音乐引擎单元测试和生产构建。iPad 设备与视口检查见 [`docs/qa/iPad-视口验收矩阵.md`](docs/qa/iPad-视口验收矩阵.md)。
+`npm run test:build` 会删除已有的生成 WASM 和 `dist/`，执行标准生产构建，并验证
+`dist/client/audio/` 包含本次生成的有效 WASM、所需音频接口和 worklet。
+`npm run test:all` 会先运行这项干净构建回归检查，再运行全部单元测试，确保真实 WASM
+音频测试不会因缺少产物而跳过；单独运行 `npm test` 不要求 Rust 工具链。
+iPad 设备与视口检查见 [`docs/qa/iPad-视口验收矩阵.md`](docs/qa/iPad-视口验收矩阵.md)。
 
 视觉回归工具用于比较同尺寸的设计参考图与浏览器截图：
 

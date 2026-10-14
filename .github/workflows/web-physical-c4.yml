@@ -4,22 +4,40 @@ on:
   pull_request:
     paths:
       - "crates/moonlight-wasm/**"
+      - "crates/moonlight-dsp/**"
       - "lib/audio/**"
       - "public/audio/**"
       - "app/lab/engine/**"
       - "tests/unit/**"
+      - "tests/build/**"
+      - "package.json"
+      - "package-lock.json"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "vite.config.ts"
+      - "build/**"
       - "scripts/build-web-audio-wasm.mjs"
+      - "scripts/run-vinext.mjs"
       - ".github/workflows/web-physical-c4.yml"
   push:
     branches:
       - feat/web-physical-c4-audioworklet
     paths:
       - "crates/moonlight-wasm/**"
+      - "crates/moonlight-dsp/**"
       - "lib/audio/**"
       - "public/audio/**"
       - "app/lab/engine/**"
       - "tests/unit/**"
+      - "tests/build/**"
+      - "package.json"
+      - "package-lock.json"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "vite.config.ts"
+      - "build/**"
       - "scripts/build-web-audio-wasm.mjs"
+      - "scripts/run-vinext.mjs"
       - ".github/workflows/web-physical-c4.yml"
 
 jobs:
@@ -38,6 +56,8 @@ jobs:
       - run: npm ci
       - run: cargo fmt --all --check
       - run: cargo test -p moonlight-wasm
-      - run: npm run audio:wasm
-      - run: node --experimental-strip-types --test tests/unit/sound-engine.test.mjs tests/unit/physical-c4-worklet.test.mjs
+      - name: Clean production build includes browser audio assets
+        run: npm run test:build
+      - run: node --test tests/unit/production-build.test.mjs
+      - run: node --experimental-strip-types --test tests/unit/sound-engine.test.mjs tests/unit/physical-c4-worklet.test.mjs tests/unit/basic-piano-worklet.test.mjs tests/unit/basic-piano-source-ownership.test.mjs
       - run: npx tsc -p tsconfig.audio-worklet.json --noEmit

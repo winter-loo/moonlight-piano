@@ -5,7 +5,9 @@ use std::fmt::{Display, Formatter};
 use moonlight_model::{ModelError, ModelPack};
 use moonlight_physics::modal_coefficients;
 
+mod basic;
 mod realtime;
+pub use basic::{BasicError, BasicPianoEngine, FIRST_NOTE, LAST_NOTE, MAX_VOICES};
 pub use realtime::{
     BlockReport, PianoEvent, PianoEventKind, MAX_BLOCK_FRAMES, MAX_EVENTS_PER_BLOCK,
 };
@@ -21,6 +23,7 @@ pub enum ProcessError {
     EventsOutOfOrder,
     UnsupportedNote(u8),
     InvalidVelocity,
+    UnsupportedControl,
     NonFiniteOutput,
 }
 
@@ -42,6 +45,7 @@ impl From<RenderError> for ProcessError {
             RenderError::EventsOutOfOrder => Self::EventsOutOfOrder,
             RenderError::UnsupportedNote(note) => Self::UnsupportedNote(note),
             RenderError::InvalidVelocity => Self::InvalidVelocity,
+            RenderError::UnsupportedControl => Self::UnsupportedControl,
             RenderError::NonFiniteOutput => Self::NonFiniteOutput,
         }
     }

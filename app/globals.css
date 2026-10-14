@@ -135,6 +135,8 @@ button:focus-visible { outline: 2px solid #72edf7; outline-offset: 3px; }
 .playable-piano { position: absolute; left: 3px; top: 331px; width: 533px; height: 176px; user-select: none; }
 .keyboard-shortcut-hint { height: 27px; display: flex; align-items: center; justify-content: center; gap: 10px; margin: 0; color: #7e8ca2; font-size: 10px; letter-spacing: .35px; }
 .keyboard-shortcut-hint span { color: #55e8f3; font-weight: 600; }
+.piano-engine-option { display: inline-flex; align-items: center; gap: 4px; color: #7e8ca2; white-space: nowrap; }
+.piano-engine-option select { max-width: 88px; padding: 2px 3px; border: 1px solid #607088; border-radius: 4px; background: #1c2435; color: #dcecf6; font: inherit; }
 .keyboard-surface { position: relative; width: 533px; height: 149px; overflow: hidden; border-radius: 0 0 5px 5px; touch-action: none; }
 .keyboard-surface > img { position: absolute; inset: 0; width: 533px; height: 149px; display: block; pointer-events: none; }
 .piano-hit { position: absolute; margin: 0; padding: 0; border: 0; color: transparent; background: transparent; cursor: pointer; touch-action: none; -webkit-tap-highlight-color: transparent; }

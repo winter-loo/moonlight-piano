@@ -10,6 +10,7 @@ pub const MAX_EVENTS_PER_BLOCK: usize = 256;
 pub enum PianoEventKind {
     NoteOn { note: u8, velocity: f32 },
     NoteOff { note: u8, release_velocity: f32 },
+    Sustain { position: f32 },
     Reset,
 }
 
@@ -36,6 +37,7 @@ pub enum RenderError {
     EventsOutOfOrder,
     UnsupportedNote(u8),
     InvalidVelocity,
+    UnsupportedControl,
     NonFiniteOutput,
 }
 
@@ -158,6 +160,7 @@ impl RealtimeState {
                 release_velocity,
             } => (note, release_velocity),
             PianoEventKind::Reset => return Ok(()),
+            PianoEventKind::Sustain { .. } => return Err(RenderError::UnsupportedControl),
         };
         if note != self.note {
             return Err(RenderError::UnsupportedNote(note));
@@ -182,6 +185,7 @@ impl RealtimeState {
             }
             PianoEventKind::NoteOff { .. } => self.key_down = false,
             PianoEventKind::Reset => self.reset(),
+            PianoEventKind::Sustain { .. } => {}
         }
     }
 }

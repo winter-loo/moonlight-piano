@@ -10,7 +10,7 @@ import {
   type BrowserSoundEngineId,
 } from "@/lib/audio/engine-registry";
 import { scheduleMetronome } from "@/lib/audio/scheduler";
-import { NOW, type SoundEngine, type SoundEngineSnapshot } from "@/lib/audio/sound-engine";
+import { NOW, atSampleFrame, type SoundEngine, type SoundEngineSnapshot } from "@/lib/audio/sound-engine";
 import { PracticeTransport, type TransportSnapshot } from "@/lib/engine/transport";
 import { mariageAmourContent } from "@/lib/music/content/mariage-amour";
 import { beatsToSeconds } from "@/lib/music/tempo";
@@ -35,7 +35,7 @@ export function EngineLab() {
   const labAttemptRef = useRef(0);
   const releaseTimersRef = useRef<number[]>([]);
   const frameWindowRef = useRef({ startedAt: 0, lastAt: 0, frames: 0, largestGap: 0 });
-  const [selectedEngineId, setSelectedEngineId] = useState<BrowserSoundEngineId>("physical-c4");
+  const [selectedEngineId, setSelectedEngineId] = useState<BrowserSoundEngineId>("basic-piano");
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [engineSnapshot, setEngineSnapshot] = useState<SoundEngineSnapshot | null>(null);
   const [startupError, setStartupError] = useState<string | null>(null);
@@ -210,6 +210,23 @@ export function EngineLab() {
     }, ...current].slice(0, 12));
   }, [selectedEngineId]);
 
+  const playScale = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine || selectedEngineId === "physical-c4") return;
+    const clock = engine.clock();
+    const start = clock.currentSampleFrame + 3 * (engine.snapshot().parameters.blockSize || 128);
+    const step = Math.round(clock.sampleRate * 0.24);
+    const notes = [21, 33, 45, 57, 60, 69, 81, 93, 108];
+    engine.dispatch(notes.flatMap((note, index) => {
+      const sourceId = `scale-${start}-${index}`;
+      const frame = start + step * index;
+      return [
+        { type: "note-on" as const, sourceId, note, velocity: 0.8, time: atSampleFrame(frame) },
+        { type: "note-off" as const, sourceId, note, releaseVelocity: 0.5, time: atSampleFrame(frame + Math.round(step * 0.7)) },
+      ];
+    }));
+  }, [selectedEngineId]);
+
   const setPedal = useCallback((type: "sustain" | "sostenuto" | "una-corda", position: number) => {
     const engine = engineRef.current;
     if (!engine) return;
@@ -288,6 +305,7 @@ export function EngineLab() {
             <div><dt>WASM memory</dt><dd>{typeof engineSnapshot?.parameters.wasmMemoryBytes === "number" ? Math.round(engineSnapshot.parameters.wasmMemoryBytes / 1024) : "—"} KiB</dd></div>
             <div><dt>underruns</dt><dd>{engineSnapshot?.parameters.underruns ?? "—"}</dd></div>
             <div><dt>late events</dt><dd>{engineSnapshot?.parameters.lateEvents ?? "—"}</dd></div>
+            <div><dt>queue overflow</dt><dd>{engineSnapshot?.parameters.overflowEvents ?? "—"}</dd></div>
           </dl>
           <div className="dialog-actions">
             <button type="button" onClick={() => void start()}><Play size={18} weight="fill" />启动</button>
@@ -316,8 +334,9 @@ export function EngineLab() {
           <h2>输入事件</h2>
           <button type="button" className="lab-tap" onPointerDown={(event: React.PointerEvent<HTMLButtonElement>) => record("pointer-c4", event.timeStamp)}>C4 · 点击或空格</button>
           <div className="dialog-actions">
-            <button type="button" disabled={selectedEngineId === "physical-c4"} onClick={(event: React.MouseEvent<HTMLButtonElement>) => record("c-major", event.timeStamp, [60, 64, 67])}>C 大三和弦</button>
+          <button type="button" disabled={selectedEngineId === "physical-c4"} onClick={(event: React.MouseEvent<HTMLButtonElement>) => record("c-major", event.timeStamp, [60, 64, 67])}>C 大三和弦</button>
             <button type="button" disabled={selectedEngineId === "physical-c4"} onClick={(event: React.MouseEvent<HTMLButtonElement>) => record("wide-chord", event.timeStamp, [48, 60, 67, 72])}>宽音域和弦</button>
+            <button type="button" disabled={selectedEngineId === "physical-c4" || !engineSnapshot?.ready} onClick={playScale}>A0–C8 音阶</button>
           </div>
           <ol>
             {logs.length === 0 ? <li className="empty">启动时钟后记录事件</li> : logs.map((entry) => (
@@ -330,22 +349,24 @@ export function EngineLab() {
           <h2>踏板事件</h2>
           <label>
             Sustain {Math.round(pedals.sustain * 100)}%
-            <input type="range" min="0" max="1" step="0.01" value={pedals.sustain} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setPedal("sustain", Number(event.target.value))} />
+            <input type="range" min="0" max="1" step={selectedEngineId === "basic-piano" ? "1" : "0.01"} disabled={selectedEngineId === "physical-c4"} value={pedals.sustain} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setPedal("sustain", Number(event.target.value))} />
           </label>
           <label>
             Sostenuto {Math.round(pedals.sostenuto * 100)}%
-            <input type="range" min="0" max="1" step="0.01" value={pedals.sostenuto} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setPedal("sostenuto", Number(event.target.value))} />
+            <input type="range" min="0" max="1" step="0.01" disabled={selectedEngineId === "basic-piano" || selectedEngineId === "physical-c4"} value={pedals.sostenuto} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setPedal("sostenuto", Number(event.target.value))} />
           </label>
           <label>
             Una corda {Math.round(pedals.unaCorda * 100)}%
-            <input type="range" min="0" max="1" step="0.01" value={pedals.unaCorda} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setPedal("una-corda", Number(event.target.value))} />
+            <input type="range" min="0" max="1" step="0.01" disabled={selectedEngineId === "basic-piano" || selectedEngineId === "physical-c4"} value={pedals.unaCorda} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setPedal("una-corda", Number(event.target.value))} />
           </label>
           <div className="dialog-actions">
-            <button type="button" onClick={() => setPedal("sustain", pedals.sustain >= 0.5 ? 0 : 1)}>切换延音</button>
-            <button type="button" onClick={() => {
+            <button type="button" disabled={selectedEngineId === "physical-c4"} onClick={() => setPedal("sustain", pedals.sustain >= 0.5 ? 0 : 1)}>切换延音</button>
+            <button type="button" disabled={selectedEngineId === "physical-c4"} onClick={() => {
               setPedal("sustain", 0);
-              setPedal("sostenuto", 0);
-              setPedal("una-corda", 0);
+              if (selectedEngineId !== "basic-piano") {
+                setPedal("sostenuto", 0);
+                setPedal("una-corda", 0);
+              }
             }}>释放全部</button>
           </div>
         </article>

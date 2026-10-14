@@ -16,6 +16,8 @@ import {
 } from "@phosphor-icons/react";
 
 import { scheduleMetronome, scheduleMidiTone } from "@/lib/audio/scheduler";
+import { createBrowserSoundEngine, type BrowserSoundEngineId } from "@/lib/audio/engine-registry";
+import { NOW, type SoundEngine } from "@/lib/audio/sound-engine";
 import {
   evaluateRhythmAttempt,
   findNearestRhythmTarget,
@@ -53,6 +55,9 @@ function ListenLesson() {
     .filter((item) => item.hand === "right" && item.measure === 6)
     .sort((a, b) => a.beat - b.beat), []);
   const contextRef = useRef<AudioContext | null>(null);
+  const engineRef = useRef<SoundEngine | null>(null);
+  const attemptRef = useRef(0);
+  const [engineId, setEngineId] = useState<BrowserSoundEngineId>("legacy-lesson-tone");
   const timersRef = useRef<number[]>([]);
   const [status, setStatus] = useState<"ready" | "demo" | "turn" | "correct">("ready");
   const [step, setStep] = useState(0);
@@ -73,26 +78,76 @@ function ListenLesson() {
   }, []);
 
   useEffect(() => () => {
+    attemptRef.current += 1;
     clearTimers();
+    engineRef.current?.stopAll(NOW);
+    void engineRef.current?.dispose();
+    engineRef.current = null;
     void contextRef.current?.close();
     contextRef.current = null;
   }, [clearTimers]);
 
+  const selectEngine = useCallback((id: BrowserSoundEngineId) => {
+    attemptRef.current += 1;
+    clearTimers();
+    engineRef.current?.stopAll(NOW);
+    void engineRef.current?.dispose();
+    engineRef.current = null;
+    setActiveMidi(null);
+    setStatus("ready");
+    setEngineId(id);
+  }, [clearTimers]);
+
+  const readyEngine = useCallback(async (context: AudioContext) => {
+    if (!engineRef.current) engineRef.current = createBrowserSoundEngine(engineId, { context, ownsContext: false });
+    const engine = engineRef.current;
+    await engine.start();
+    return engine;
+  }, [engineId]);
+
   const playDemo = useCallback(async () => {
+    const attempt = ++attemptRef.current;
     clearTimers();
     const context = ensureContext();
     const secondsPerBeat = beatsToSeconds(1, 75);
-    const audioStart = context.currentTime + 0.12;
     setStatus("demo");
     setStep(0);
     setMistakes(0);
     setWrongMidi(null);
     setMessage("看好发亮的琴键，也听一听每个音之间的距离。");
 
+    let engine: SoundEngine;
+    try {
+      engine = await readyEngine(context);
+    } catch (error) {
+      if (attemptRef.current !== attempt) return;
+      if (engineId !== "basic-piano") {
+        setStatus("ready");
+        setMessage(error instanceof Error ? error.message : String(error));
+        return;
+      }
+      void engineRef.current?.dispose();
+      const fallback = createBrowserSoundEngine("legacy-lesson-tone", { context, ownsContext: false });
+      engineRef.current = fallback;
+      setEngineId("legacy-lesson-tone");
+      setMessage("Rust 音色加载失败，已切回当前课程音色。听完后再跟弹。");
+      try {
+        await fallback.start();
+        engine = fallback;
+      } catch {
+        setStatus("ready");
+        setMessage("音频引擎暂时不可用，请重试。");
+        return;
+      }
+    }
+    if (attemptRef.current !== attempt) return;
+    engine.stopAll(NOW);
+    const audioStart = engine.clock().currentTimeSeconds + 0.12;
+
     for (const item of events) {
       const delay = item.beat * secondsPerBeat;
       const duration = item.durationBeats * secondsPerBeat;
-      scheduleMidiTone(context, item.midi, audioStart + delay, duration, 0.16);
+      scheduleMidiTone(engine, item.midi, audioStart + delay, duration, 0.16);
       timersRef.current.push(window.setTimeout(() => setActiveMidi(item.midi), (delay + 0.12) * 1000));
       timersRef.current.push(window.setTimeout(() => setActiveMidi(null), (delay + 0.12 + Math.min(duration * 0.78, 0.48)) * 1000));
     }
@@ -102,12 +157,13 @@ function ListenLesson() {
       setStatus("turn");
       setMessage("轮到你了！从刚才的第一个音开始。");
     }, endDelay));
-  }, [clearTimers, ensureContext, events]);
+  }, [clearTimers, ensureContext, engineId, events, readyEngine]);
 
   const playUserNote = useCallback(async (midi: number) => {
     if (status !== "turn") return;
-    const context = ensureContext();
-    scheduleMidiTone(context, midi, context.currentTime, 0.42, 0.14);
+    const engine = engineRef.current;
+    if (!engine?.snapshot().ready) return;
+    scheduleMidiTone(engine, midi, engine.clock().currentTimeSeconds + 0.015, 0.42, 0.14);
     setActiveMidi(midi);
     timersRef.current.push(window.setTimeout(() => setActiveMidi(null), 190));
 
@@ -130,7 +186,7 @@ function ListenLesson() {
     } else {
       setMessage(nextStep === 1 ? "第一个音对了，继续。" : "对，就是这样。继续弹下一个音。");
     }
-  }, [ensureContext, events, status, step]);
+  }, [events, status, step]);
 
   const coachTitle = status === "demo" ? "看我弹一遍" : status === "correct" ? "全部弹对了！" : status === "turn" ? "轮到你了！" : "先听，再弹";
   const hintMidi = status === "turn" && mistakes >= 2 ? events[step]?.midi ?? null : null;
@@ -140,6 +196,12 @@ function ListenLesson() {
       <div className="lesson-kicker">听辨 · 虚拟钢琴跟弹</div>
       <h1 id="lesson-title">{coachTitle}</h1>
       <p className="lesson-lead" aria-live="polite">{message}</p>
+      <label>示范与跟弹音色
+        <select value={engineId} onChange={(event) => selectEngine(event.target.value as BrowserSoundEngineId)}>
+          <option value="legacy-lesson-tone">当前课程音色</option>
+          <option value="basic-piano">Rust 基础全键盘（开发中）</option>
+        </select>
+      </label>
 
       <div className="echo-coach" aria-hidden="true">
         <img src="/assets/moon-panda-coach.png" alt="" />
