@@ -116,7 +116,7 @@ test("grand staff plays both hands, previews, track isolation, pause and timbre 
   await stop(page);
 
   await clearSent(page);
-  await page.locator('.event-group[data-hand="rh"]').first().click();
+  await page.locator('.event-group[data-hand="rh"] .pitch-badge-treble').first().click();
   await waitForSound(page);
   assert.deepEqual(await onsets(page), [65]);
   await stop(page);
