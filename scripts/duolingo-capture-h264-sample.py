@@ -243,6 +243,7 @@ def capture_sample(
     output_dir: Path,
     duration_seconds: float,
     sample_fps: float,
+    capture_fps: int = 60,
     start_tap: tuple[int, int] | None = None,
     start_tap_count: int = 0,
     start_tap_delay_ms: float = 250.0,
@@ -265,7 +266,12 @@ def capture_sample(
     frames_dir.mkdir()
     metadata_path = output_dir / "frames.jsonl"
     reader = load_reader()
-    pump = reader.H264FramePump("adb", serial)
+    pump = reader.H264FramePump(
+        "adb", serial,
+        encoder_fps=capture_fps,
+        output_fps=capture_fps,
+        warmup_frames=max(20, capture_fps),
+    )
     assist = AssistTapScheduler(serial) if assist_profile is not None else None
     assist_key_points = (
         _kbdetect.resolve_key_points(
@@ -469,6 +475,8 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--duration", type=float, default=10.0)
     parser.add_argument("--sample-fps", type=float, default=10.0)
+    parser.add_argument("--capture-fps", type=int, default=60,
+                        help="H.264 capture cadence; use 15 if 60 fps cannot start")
     parser.add_argument(
         "--start-tap",
         metavar="X,Y",
@@ -488,6 +496,8 @@ def main() -> None:
     parser.add_argument("--assist-speed-px-s", type=float, default=280.0)
     parser.add_argument("--assist-bpm", type=float, default=116.7)
     args = parser.parse_args()
+    if args.capture_fps <= 0:
+        parser.error("--capture-fps must be positive")
     start_tap = None
     if args.start_tap is not None:
         try:
@@ -500,6 +510,7 @@ def main() -> None:
         output_dir=args.output,
         duration_seconds=args.duration,
         sample_fps=args.sample_fps,
+        capture_fps=args.capture_fps,
         start_tap=start_tap,
         start_tap_count=args.start_tap_count,
         start_tap_delay_ms=args.start_tap_delay_ms,

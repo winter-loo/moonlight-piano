@@ -4,15 +4,15 @@ from collections import Counter
 from pathlib import Path
 
 
-OUTPUT_DIR = (
+FIXTURE_DIR = (
     Path(__file__).parents[1]
-    / "outputs/duolingo-stage4-section14-musette/ultimate"
+    / "tests/fixtures/duolingo-frozen-plans"
 )
-CORRECTED_PLAN_PATH = OUTPUT_DIR / "musette-corrected-frozen-plan.json"
-SUPERSEDED_PLAN_PATH = OUTPUT_DIR / "musette-frozen-plan.json"
+CORRECTED_PLAN_PATH = FIXTURE_DIR / "musette-corrected-frozen-plan.json"
+SUPERSEDED_PLAN_PATH = FIXTURE_DIR / "musette-frozen-plan.json"
 
 # Independent 4/4 transcription used as the timing oracle, transcribed from
-# docs/practiced-songs/musette-in-c-major.md.  ``None`` denotes a rest, so
+# docs/practiced-songs/014-musette-in-c-major.md.  ``None`` denotes a rest, so
 # every measure documents all four beats rather than only the notes that
 # happen to be sent to Android.
 #
@@ -56,9 +56,6 @@ SUPERSEDED_TAIL = (
 )
 
 
-HAVE_PLANS = CORRECTED_PLAN_PATH.exists() and SUPERSEDED_PLAN_PATH.exists()
-
-
 def transcribed_events():
     events = []
     beat = 0.0
@@ -81,9 +78,6 @@ def transcribed_events():
     return events
 
 
-@unittest.skipUnless(
-    HAVE_PLANS, "captured frozen plans are not present in this checkout"
-)
 class MusetteFrozenPlanTest(unittest.TestCase):
     def setUp(self):
         self.plan = json.loads(CORRECTED_PLAN_PATH.read_text(encoding="utf-8"))
@@ -122,8 +116,8 @@ class MusetteFrozenPlanTest(unittest.TestCase):
         self.assertEqual(71, self.plan["stop_after_beat"])
         self.assertLess(last["start_beat"], self.plan["stop_after_beat"])
 
-    def test_superseded_plan_is_kept_as_tail_garbage_evidence(self):
-        """The 79-event capture stays on disk, but only as evidence."""
+    def test_superseded_plan_exercises_tail_garbage_regression(self):
+        """The fixture preserves the ten extra notes the gate must suppress."""
         superseded = json.loads(SUPERSEDED_PLAN_PATH.read_text(encoding="utf-8"))
         self.assertEqual(79, len(superseded["events"]))
         boundary = self.plan["last_valid_event_index"] + 1

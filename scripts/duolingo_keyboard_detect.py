@@ -246,8 +246,13 @@ def detect_keyboard(
             if left is None or left.octave is None or left.letter not in SHARP_OF:
                 continue
             pitch = f"{SHARP_OF[left.letter]}{left.octave}"
-            keys[pitch] = (int(round(black[0])), black_y)
+            target = (int(round(black[0])), black_y)
+            keys[pitch] = target
             labels[pitch] = f"{SHARP_OF[left.letter]}{ARROW_SUFFIX[left.arrow]}"
+            # The same black key may be written as a sharp by the score.
+            sharp_pitch = f"{left.letter}#{left.octave}"
+            keys[sharp_pitch] = target
+            labels[sharp_pitch] = f"{left.letter}#{ARROW_SUFFIX[left.arrow]}"
 
     return KeyboardLayout(
         keys=keys,

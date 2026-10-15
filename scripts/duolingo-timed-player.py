@@ -1370,7 +1370,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     beat_ns = round(60_000_000_000 / args.bpm)
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
-
     log: dict[str, object] = {
         "serial": args.serial,
         "bpm": args.bpm,
@@ -3193,6 +3192,24 @@ def run_frozen_plan(args: argparse.Namespace) -> dict[str, object]:
 
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    phase_reference_path = getattr(args, "frozen_phase_reference", None)
+    phase_reference = None
+    if phase_reference_path is not None:
+        reference_doc = json.loads(phase_reference_path.read_text(encoding="utf-8"))
+        reference_log = json.loads(
+            (phase_reference_path.parent / "timing-log.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        phase_reference = (reference_doc["samples"], reference_log)
+    observer = None
+    if args.frozen_visual_log or phase_reference is not None:
+        from duolingo_frozen_visual import FrozenVisualObserver
+        observer = FrozenVisualObserver(
+            adb=adb, serial=args.serial, key_points=key_points,
+            output_dir=output_dir,
+        )
+        observer.start()
     beat_ns = round(60_000_000_000 / args.bpm)
     advance_ns = round(args.input_advance_ms * 1_000_000)
     score_start_delay_ns = round(args.score_start_delay_ms * 1_000_000)
@@ -3211,6 +3228,7 @@ def run_frozen_plan(args: argparse.Namespace) -> dict[str, object]:
         "quarter_ms": beat_ns / 1_000_000,
         "input_advance_ms": args.input_advance_ms,
         "score_start_delay_ms": args.score_start_delay_ms,
+        "phase_reference": str(phase_reference_path) if phase_reference_path else None,
         "event_count": len(events),
         "last_valid_event_index": last_valid_event_index,
         "stop_after_beat": stop_after_beat,
@@ -3253,6 +3271,8 @@ def run_frozen_plan(args: argparse.Namespace) -> dict[str, object]:
         )
         wait_until_ns(launch_deadline_ns)
         sent_ns, pending = input_shell.send("DOWN", events[0][1], sequence)
+        if observer is not None:
+            observer.mark("DOWN", events[0][1], sent_ns)
         score_sequences.add(sequence)
         input_shell.wait_for({sequence}, timeout=2.0)
         origin_ack_ns = input_shell.ack_ns(sequence)
@@ -3318,7 +3338,40 @@ def run_frozen_plan(args: argparse.Namespace) -> dict[str, object]:
         # its own deadline in short slices, so the gate can stop the run
         # between any two of them.
         window_ns = max(1, round(args.release_window_ms * 1_000_000))
-        for deadline_ns, _, event_index, kind, pitch, beat in actions:
+        phase_offset_ns = 0
+        phase_calibrated = False
+        for base_deadline_ns, _, event_index, kind, pitch, beat in actions:
+            if event_index and phase_reference is not None and not phase_calibrated:
+                from duolingo_frozen_visual import phase_correction_ms
+
+                # The first seven beats contain a rest long enough to observe
+                # this run's scroll phase before the next note is due.
+                wait_until_ns(origin_ack_ns + round(7.0 * beat_ns))
+                sample = observer.latest_sample()
+                reference_samples, reference_log = phase_reference
+                correction_ms = phase_correction_ms(
+                    sample,
+                    current_origin_ns=origin_ack_ns,
+                    current_beat_ns=beat_ns,
+                    reference=reference_samples,
+                    reference_origin_ns=int(reference_log["origin_device_ack_ns"]),
+                    reference_beat_ns=round(
+                        60_000_000_000 / float(reference_log["bpm"])
+                    ),
+                    now_ns=time.monotonic_ns(),
+                )
+                if correction_ms is not None:
+                    phase_offset_ns = round(correction_ms * 1_000_000)
+                log["phase_calibration"] = {
+                    "beat": 7.0,
+                    "sample": sample,
+                    "correction_ms": correction_ms,
+                    "applied_ms": phase_offset_ns / 1_000_000,
+                }
+                phase_calibrated = True
+            deadline_ns = base_deadline_ns + (
+                phase_offset_ns if event_index else 0
+            )
             if kind == "UP":
                 if event_index not in held:
                     continue
@@ -3331,6 +3384,8 @@ def run_frozen_plan(args: argparse.Namespace) -> dict[str, object]:
             if kind == "DOWN" and not gate.admits(event_index, beat):
                 break
             sent_ns, pending = input_shell.send(kind, pitch, sequence)
+            if observer is not None:
+                observer.mark(kind, pitch, sent_ns)
             score_sequences.add(sequence)
             append_action(
                 sequence=sequence,
@@ -3351,7 +3406,7 @@ def run_frozen_plan(args: argparse.Namespace) -> dict[str, object]:
                     release_beat=release_beat,
                     scheduled_release_ns=release_deadline_ns(
                         event_index, release_beat
-                    ),
+                    ) + phase_offset_ns,
                 )
             else:
                 held.pop(event_index, None)
@@ -3364,6 +3419,8 @@ def run_frozen_plan(args: argparse.Namespace) -> dict[str, object]:
         ):
             wait_until_ns(release_ns)
             sent_ns, pending = input_shell.send("UP", note.pitch, sequence)
+            if observer is not None:
+                observer.mark("UP", note.pitch, sent_ns)
             score_sequences.add(sequence)
             append_action(
                 sequence=sequence,
@@ -3396,6 +3453,8 @@ def run_frozen_plan(args: argparse.Namespace) -> dict[str, object]:
         gate.close(f"playback aborted: {exc!r}")
         raise
     finally:
+        if observer is not None:
+            observer.stop()
         log["playback_gate_closed_reason"] = gate.closed_reason
         log["playback_gate_close_was_planned"] = gate.closed_planned
         log["events_sent"] = sorted(
@@ -3470,6 +3529,16 @@ def parse_args() -> argparse.Namespace:
         "--frozen-plan",
         type=Path,
         help="play an offline-verified JSON event plan on one absolute clock",
+    )
+    parser.add_argument(
+        "--frozen-visual-log",
+        action="store_true",
+        help="record decoded barline motion and key highlights during a frozen plan",
+    )
+    parser.add_argument(
+        "--frozen-phase-reference",
+        type=Path,
+        help="calibrate the frozen clock at beat seven against a visual-samples.json run",
     )
     parser.add_argument(
         "--known-tail",

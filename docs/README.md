@@ -16,10 +16,10 @@
 
 ## 实机练习曲目
 
-- [`practiced-songs/bicycle-built-for-two.md`](practiced-songs/bicycle-built-for-two.md)：Bicycle Built for Two
-- [`practiced-songs/greensleeves.md`](practiced-songs/greensleeves.md)：Greensleeves
-- [`practiced-songs/when-the-saints-go-marching-in.md`](practiced-songs/when-the-saints-go-marching-in.md)：When The Saints Go Marching In
-- [`practiced-songs/little-miss-cant-be-wrong.md`](practiced-songs/little-miss-cant-be-wrong.md)：Little Miss Can’t Be Wrong
+- [`practiced-songs/007-bicycle-built-for-two.md`](practiced-songs/007-bicycle-built-for-two.md)：Bicycle Built for Two
+- [`practiced-songs/007-greensleeves.md`](practiced-songs/007-greensleeves.md)：Greensleeves
+- [`practiced-songs/012-when-the-saints-go-marching-in.md`](practiced-songs/012-when-the-saints-go-marching-in.md)：When The Saints Go Marching In
+- [`practiced-songs/013-little-miss-cant-be-wrong.md`](practiced-songs/013-little-miss-cant-be-wrong.md)：Little Miss Can’t Be Wrong
 
 ## 质量与验证
 

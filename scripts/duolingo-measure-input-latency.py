@@ -29,6 +29,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 import duolingo_keyboard_detect as kbdetect  # noqa: E402
+from duolingo_measure_tracker import detect_measure_barline_candidates  # noqa: E402
 
 REPO_ROOT = _SCRIPTS_DIR.parent
 STAFF_BAND = (140, 400)
@@ -41,6 +42,33 @@ def load_script(alias: str, filename: str):
     sys.modules[alias] = module
     spec.loader.exec_module(module)
     return module
+
+
+def load_reader(path: Path):
+    spec = importlib.util.spec_from_file_location("dl_reader_latency", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def recognition_load(reader, pump, interval_s, stop, counts):
+    """Recognise frames on a cadence, the way the rehearsal player does.
+
+    The observed lag depends on how busy the process is, so a measurement
+    taken on an idle process says little about the lag during play.
+    """
+    last = -1
+    while not stop.is_set():
+        started = time.monotonic()
+        try:
+            image = pump.wait_for_frame(after_sequence=last, timeout=1.0)
+            last = pump.sequence
+            reader.analyze_image(image)
+            counts["reads"] += 1
+        except Exception:
+            pass
+        stop.wait(max(0.0, interval_s - (time.monotonic() - started)))
 
 
 @dataclass
@@ -80,7 +108,7 @@ def key_roi(point, is_black):
 
 
 def run(args) -> dict:
-    reader = load_script("dl_reader_latency", "duolingo-read-screen-notes.py")
+    reader = load_reader(args.reader)
     timed = load_script("dl_timed_latency", "duolingo-timed-player.py")
 
     key_points = kbdetect.resolve_key_points(serial=args.serial, adb=args.adb)
@@ -98,8 +126,9 @@ def run(args) -> dict:
     schedule = []
     for i in range(args.probe_trials):
         schedule.append((args.first_probe_ms + i * args.probe_interval_ms, args.probe_pitch, args.hold_ms))
-    start_offset = args.first_probe_ms + args.probe_trials * args.probe_interval_ms
-    schedule.append((start_offset, args.start_pitch, args.hold_ms))
+    if not args.no_start:
+        start_offset = args.first_probe_ms + args.probe_trials * args.probe_interval_ms
+        schedule.append((start_offset, args.start_pitch, args.hold_ms))
 
     pump = reader.H264FramePump(args.adb, args.serial)
     shell = timed.PersistentInputShell(args.adb, args.serial, key_points=key_points)
@@ -116,6 +145,26 @@ def run(args) -> dict:
             target=press_worker, args=(shell, schedule, start_ns, actions, stop), daemon=True
         )
         worker.start()
+        load_counts = {"reads": 0, "barlines": 0, "saved": 0}
+        rehearse_geometry = None
+        save_dir = None
+        if args.rehearse_load:
+            # Reproduce the rehearsal player's per-frame work, not just its
+            # recognition cadence: barline search on every frame and a PNG
+            # written every other frame.
+            args.load_interval_ms = args.load_interval_ms or 400.0
+            first = pump.wait_for_frame(after_sequence=-1, timeout=2.0)
+            ctx = reader.build_analysis_context(first)
+            if ctx.staff_lines is not None:
+                rehearse_geometry = (list(ctx.staff_lines), ctx.judgment_line_x)
+            import tempfile
+            save_dir = Path(tempfile.mkdtemp(prefix="latency-load-"))
+        if args.load_interval_ms > 0:
+            threading.Thread(
+                target=recognition_load,
+                args=(reader, pump, args.load_interval_ms / 1000.0, stop, load_counts),
+                daemon=True,
+            ).start()
         deadline = start_ns + int(args.duration * 1_000_000_000)
         last_sequence = -1
         while time.monotonic_ns() < deadline:
@@ -126,6 +175,13 @@ def run(args) -> dict:
             lum = arr.mean(axis=2)
             band = lum[STAFF_BAND[0]:STAFF_BAND[1], SCROLL_X[0]:SCROLL_X[1]]
             profiles.append((255.0 - band).sum(axis=0))
+            if args.rehearse_load:
+                if rehearse_geometry is not None:
+                    detect_measure_barline_candidates(image, *rehearse_geometry)
+                    load_counts["barlines"] += 1
+                if len(frames) % 2 == 0:
+                    image.save(save_dir / f"f{len(frames):04d}.png", format="PNG")
+                    load_counts["saved"] += 1
             frames.append({
                 "index": len(frames),
                 "monotonic_ns": received_ns,
@@ -147,7 +203,14 @@ def run(args) -> dict:
         except Exception:
             pass
 
-    return analyze(args, frames, profiles, actions, start_ns, key_points, warmup_ms, schedule)
+    summary = analyze(args, frames, profiles, actions, start_ns, key_points, warmup_ms, schedule)
+    summary["load_interval_ms"] = args.load_interval_ms
+    summary["load_reads"] = load_counts["reads"]
+    summary["load_barlines"] = load_counts["barlines"]
+    summary["load_saved"] = load_counts["saved"]
+    summary["rehearse_load"] = bool(args.rehearse_load)
+    summary["reader"] = str(args.reader)
+    return summary
 
 
 def motion_shift(previous, current, lo=-90, hi=25):
@@ -174,13 +237,16 @@ def analyze(args, frames, profiles, actions, start_ns, key_points, warmup_ms, sc
     for action in downs:
         roi_series = [(f["relative_ms"], f["roi"][action.pitch]) for f in frames]
         sent_ms = (action.sent_ns - start_ns) / 1_000_000
-        before = [v for t, v in roi_series if t < sent_ms]
-        if len(before) < 3:
+        # Only the moments just before this press: a longer window reaches back
+        # into the previous press's highlight and inflates the noise estimate
+        # until no real highlight can clear the threshold.
+        before = [v for t, v in roi_series if sent_ms - 500.0 <= t < sent_ms]
+        if len(before) < 2:
             results.append({"pitch": action.pitch, "sent_ms": sent_ms, "error": "no baseline"})
             continue
-        baseline = float(np.median(before[-15:]))
-        noise = float(np.percentile([abs(v - baseline) for v in before[-15:]], 95)) or 0.0
-        threshold = max(noise * 3.0, args.roi_threshold)
+        baseline = float(np.median(before))
+        noise = float(np.median([abs(v - baseline) for v in before]))
+        threshold = max(noise * 6.0, args.roi_threshold)
         after = [(t, v) for t, v in roi_series if t >= sent_ms]
         hit = next((t for t, v in after if abs(v - baseline) > threshold), None)
         prev_t = None
@@ -205,6 +271,10 @@ def analyze(args, frames, profiles, actions, start_ns, key_points, warmup_ms, sc
     ]
     summary = {
         "protocol": "duolingo-input-latency/v1",
+        "roi_series": {
+            pitch: [[round(f["relative_ms"], 1), round(f["roi"][pitch], 2)] for f in frames]
+            for pitch in frames[0]["roi"]
+        } if frames else {},
         "serial": args.serial,
         "warmup_ms": round(warmup_ms, 2),
         "frame_count": len(frames),
@@ -218,7 +288,8 @@ def analyze(args, frames, profiles, actions, start_ns, key_points, warmup_ms, sc
             round(frames[motion_idx - 1]["relative_ms"], 2) if motion_idx else None
         ),
     }
-    start_press = next((r for r in results if r["pitch"] == args.start_pitch), None)
+    start_press = None if args.no_start else next(
+        (r for r in results if r["pitch"] == args.start_pitch), None)
     if start_press and summary["scroll_motion_ms"] is not None:
         summary["start_note_total_ms"] = round(summary["scroll_motion_ms"] - start_press["sent_ms"], 2)
         if start_press.get("highlight_latency_ms") is not None:
@@ -241,6 +312,15 @@ def main() -> None:
     parser.add_argument("--first-probe-ms", type=float, default=1200.0)
     parser.add_argument("--probe-interval-ms", type=float, default=1500.0)
     parser.add_argument("--roi-threshold", type=float, default=1.5)
+    parser.add_argument("--rehearse-load", action="store_true",
+                        help="add the rehearsal player's per-frame barline search and PNG saving")
+    parser.add_argument("--no-start", action="store_true",
+                        help="probe only; never press the start key")
+    parser.add_argument("--load-interval-ms", type=float, default=0.0,
+                        help="recognise a frame this often in the background (0 = idle)")
+    parser.add_argument("--reader", type=Path,
+                        default=REPO_ROOT / "scripts" / "duolingo-read-screen-notes.py",
+                        help="reader module providing H264FramePump")
     args = parser.parse_args()
     summary = run(args)
     if args.output:

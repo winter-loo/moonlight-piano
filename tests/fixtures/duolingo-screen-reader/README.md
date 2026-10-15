@@ -32,3 +32,7 @@ at and to the right of the visible judgment line.
 
 The PNGs are test inputs, not generated test output. Do not replace them with
 annotated images because the detector must receive the original pixels.
+
+- `downstem-flag-pitch-shift.png`: Stage 4 Part 131 opening; a downward C5
+  eighth-note flag pulls the narrow-row center toward B-flat4. The real-screen
+  regression test verifies the five visible pitches and their durations.

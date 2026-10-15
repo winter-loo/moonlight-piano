@@ -10,6 +10,7 @@ a structured ledger with pitch, physical key mapping, and relative timing (hold 
 from __future__ import annotations
 
 import argparse
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 import io
@@ -35,6 +36,7 @@ from duolingo_keyboard_detect import (  # noqa: E402
     KeyboardNotDetectedError,
     detect_keyboard,
 )
+from duolingo_pitch import apply_key_signature  # noqa: E402
 
 
 # Key targets are no longer hard-coded.  Every lesson re-anchors the pitches on
@@ -165,6 +167,7 @@ class H264FramePump:
         encoder_fps: int = 60,
         output_fps: int = 60,
         warmup_frames: int = 60,
+        archive_path: Path | None = None,
     ) -> None:
         self._adb = adb
         self._serial = serial
@@ -175,6 +178,13 @@ class H264FramePump:
         self._encoder_fps = encoder_fps
         self._output_fps = output_fps
         self._warmup_frames = warmup_frames
+        self._archive_path = archive_path
+        self._remote_pts_path = (
+            f"/data/local/tmp/codex-screen-encoder-{uuid.uuid4().hex}.pts"
+            if archive_path is not None else "/dev/null"
+        )
+        self._archive_stream = None
+        self._archive_thread: threading.Thread | None = None
         self._frame_size = width * height * 3
         self._encoder: subprocess.Popen[bytes] | None = None
         self._decoder: subprocess.Popen[bytes] | None = None
@@ -200,7 +210,7 @@ class H264FramePump:
             "CLASSPATH=/data/local/tmp/codex-screen-encoder.jar "
             "app_process /system/bin CodexScreenEncoder "
             f"{self._width} {self._height} {self._bitrate} "
-            f"{self._encoder_fps} 86400 0 /dev/null"
+            f"{self._encoder_fps} 86400 0 {self._remote_pts_path}"
         )
         self._encoder = subprocess.Popen(
             [self._adb, "-s", self._serial, "exec-out", "sh", "-c", remote],
@@ -208,6 +218,8 @@ class H264FramePump:
             stderr=subprocess.PIPE,
         )
         assert self._encoder.stdout is not None
+        if self._archive_path is not None:
+            self._archive_stream = self._archive_path.open("wb")
         self._decoder = subprocess.Popen(
             [
                 self._ffmpeg,
@@ -219,17 +231,23 @@ class H264FramePump:
                 "h264",
                 "-i",
                 "pipe:0",
+                "-vf",
+                f"fps={self._output_fps}",
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
                 "rgb24",
                 "pipe:1",
             ],
-            stdin=self._encoder.stdout,
+            stdin=subprocess.PIPE if self._archive_path is not None else self._encoder.stdout,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        self._encoder.stdout.close()
+        if self._archive_path is not None:
+            self._archive_thread = threading.Thread(target=self._archive_h264, daemon=True)
+            self._archive_thread.start()
+        else:
+            self._encoder.stdout.close()
         for name, process in (("encoder", self._encoder), ("decoder", self._decoder)):
             assert process.stderr is not None
             thread = threading.Thread(
@@ -243,9 +261,31 @@ class H264FramePump:
         self._reader_thread.start()
         self._wait_until_ready(timeout)
 
+    def _archive_h264(self) -> None:
+        """Copy the one encoded stream to disk and to the live decoder."""
+        assert self._encoder is not None and self._encoder.stdout is not None
+        assert self._decoder is not None and self._decoder.stdin is not None
+        assert self._archive_stream is not None
+        try:
+            while block := self._encoder.stdout.read1(64 * 1024):
+                self._archive_stream.write(block)
+                self._decoder.stdin.write(block)
+        except (BrokenPipeError, OSError) as exc:
+            if not self._stopping:
+                with self._condition:
+                    self._error = f"H.264 archive pipe failed: {exc}"
+                    self._condition.notify_all()
+        finally:
+            self._archive_stream.close()
+            try:
+                self._decoder.stdin.close()
+            except OSError:
+                pass
+
     def _wait_until_ready(self, timeout: float) -> None:
         """Wait until startup backlog is drained and output is real-time."""
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
         with self._condition:
             while (
                 self._sequence < self._warmup_frames
@@ -253,7 +293,15 @@ class H264FramePump:
             ):
                 if self._error is not None:
                     raise RuntimeError(self._error)
-                remaining = deadline - time.monotonic()
+                now = time.monotonic()
+                # ffmpeg may deliver fresh frames in short bursts, making the
+                # interval counter stay at zero despite a live 10-fps stream.
+                if (self._sequence >= self._warmup_frames
+                        and now - started >= max(2.0, self._warmup_frames / self._output_fps)
+                        and self._latest_arrival_ns
+                        and time.monotonic_ns() - self._latest_arrival_ns < 250_000_000):
+                    return
+                remaining = deadline - now
                 if remaining <= 0:
                     raise TimeoutError("H.264 stream did not reach real-time cadence")
                 self._condition.wait(remaining)
@@ -281,8 +329,13 @@ class H264FramePump:
                 with self._condition:
                     if self._latest_arrival_ns:
                         interval_ns = arrival_ns - self._latest_arrival_ns
+                        # Decimated output can arrive in short batches even
+                        # after the source backlog is drained. Do not demand
+                        # a full fraction of its nominal 15-fps period here;
+                        # the original 60-fps cadence remains a useful floor
+                        # for distinguishing a decoder flush from live frames.
                         minimum_live_interval_ns = int(
-                            0.45 * 1_000_000_000 / self._output_fps
+                            0.45 * 1_000_000_000 / max(self._output_fps, 60)
                         )
                         self._stable_intervals = (
                             self._stable_intervals + 1
@@ -306,6 +359,18 @@ class H264FramePump:
         after_sequence: int,
         timeout: float,
     ) -> Image.Image:
+        image, _, _ = self.wait_for_timed_frame(
+            after_sequence=after_sequence, timeout=timeout,
+        )
+        return image
+
+    def wait_for_timed_frame(
+        self,
+        *,
+        after_sequence: int,
+        timeout: float,
+    ) -> tuple[Image.Image, int, int]:
+        """Return one frame with its decoder-arrival time, not processing time."""
         deadline = time.monotonic() + timeout
         with self._condition:
             while self._latest is None or self._sequence <= after_sequence:
@@ -316,17 +381,31 @@ class H264FramePump:
                     raise TimeoutError("H.264 stream produced no fresh frame")
                 self._condition.wait(remaining)
             frame = self._latest
+            sequence = self._sequence
+            arrival_ns = self._latest_arrival_ns
         assert frame is not None
-        return Image.frombytes("RGB", (self._width, self._height), frame)
+        return Image.frombytes("RGB", (self._width, self._height), frame), sequence, arrival_ns
 
     def stop(self) -> None:
         with self._condition:
             self._stopping = True
             self._condition.notify_all()
-        for process in (self._decoder, self._encoder):
+        # With archiving enabled, drain the encoder pipe into both sinks before
+        # closing the decoder; otherwise its broken pipe truncates the archive.
+        if self._encoder is not None and self._encoder.poll() is None:
+            self._encoder.terminate()
+        if self._encoder is not None:
+            try:
+                self._encoder.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                self._encoder.kill()
+                self._encoder.wait()
+        if self._archive_thread is not None:
+            self._archive_thread.join(timeout=2.0)
+        for process in (self._decoder,):
             if process is not None and process.poll() is None:
                 process.terminate()
-        for process in (self._decoder, self._encoder):
+        for process in (self._decoder,):
             if process is None:
                 continue
             try:
@@ -344,6 +423,14 @@ class H264FramePump:
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None and not stream.closed:
                     stream.close()
+        if self._archive_path is not None:
+            result = subprocess.run(
+                [self._adb, "-s", self._serial, "exec-out", "cat", self._remote_pts_path],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            if result.returncode != 0 or not result.stdout:
+                raise RuntimeError("could not retrieve H.264 frame PTS from device")
+            self._archive_path.with_suffix(".pts").write_bytes(result.stdout)
 
 
 def find_staff_lines(arr: np.ndarray) -> tuple[int, int, int, int, int]:
@@ -376,21 +463,17 @@ def locate_judgment_line(arr: np.ndarray) -> int:
         & (band.mean(axis=2) <= 252)
     )
     continuity = neutral_gray.sum(axis=0)
-    threshold = max(120.0, float(continuity.max()) * 0.65)
-    labels, count = scipy.ndimage.label(continuity >= threshold)
-    best_columns: np.ndarray | None = None
-    best_weight = -1.0
-    for label_id in range(1, count + 1):
-        columns = np.where(labels == label_id)[0]
-        if len(columns) < 5:
-            continue
-        weight = float(continuity[columns].sum())
-        if weight > best_weight:
-            best_columns = columns
-            best_weight = weight
-    if best_columns is not None:
-        center = np.average(best_columns, weights=continuity[best_columns])
-        return x0 + int(round(float(center)))
+    # A notehead or stem can cross the translucent line and split its per-pixel
+    # continuity into several narrow islands. Integrate across the line's
+    # physical width before choosing a location instead of requiring five
+    # adjacent columns to pass one threshold.
+    line_width = 18
+    window_strength = np.convolve(
+        continuity, np.ones(line_width, dtype=np.float64), mode="valid",
+    )
+    strongest = int(np.argmax(window_strength))
+    if window_strength[strongest] >= line_width * 80:
+        return x0 + strongest + line_width // 2
 
     # Last-resort fallback for unfamiliar themes.
     sub = arr[350:480, 200:500]
@@ -438,7 +521,15 @@ def refine_hollow_notehead_center(
     ellipse_distance = (grid_x / 21.0) ** 2 + (grid_y / 14.0) ** 2
     ring_mask = (ellipse_distance <= 1.0) & (ellipse_distance >= 0.45)
     core_mask = ellipse_distance <= 0.35
-    dark = (arr < 130).all(axis=2)
+    # Only these pixels can be visited by the candidate-center search below.
+    # Building a full-frame mask once per hollow candidate dominates the live
+    # reader on dense scores, even though each patch is only 49x37 pixels.
+    rough_y = int(round(rough_center_y))
+    top = max(0, rough_y - 31 - radius_y)
+    bottom = min(h, rough_y + 31 + radius_y + 1)
+    left = max(0, candidate_x - 14 - radius_x)
+    right = min(w, candidate_x + 14 + radius_x + 1)
+    dark = (arr[top:bottom, left:right] < 130).all(axis=2)
 
     best: tuple[float, float, float] | None = None
     for expected_y, _description in positions.values():
@@ -452,8 +543,8 @@ def refine_hollow_notehead_center(
             if center_x - radius_x < 0 or center_x + radius_x >= w:
                 continue
             patch = dark[
-                center_y - radius_y : center_y + radius_y + 1,
-                center_x - radius_x : center_x + radius_x + 1,
+                center_y - radius_y - top : center_y + radius_y + 1 - top,
+                center_x - radius_x - left : center_x + radius_x + 1 - left,
             ]
             ring_darkness = float(patch[ring_mask].mean())
             core_darkness = float(patch[core_mask].mean())
@@ -528,7 +619,12 @@ def detect_flat_key_signature_count(arr: np.ndarray) -> int:
     not necessarily black. Flat glyphs form roughly 30x64px components; the
     height constraint excludes nearby 3/4 time-signature digits.
     """
-    region = arr[125:345, 195:315]
+    # In some lessons the second flat reaches y≈117; cropping at y=125
+    # shortens its component below the height threshold and silently turns
+    # every E-flat note into E-natural.
+    # Scan through the whole signature slot.  Cropping at x=350 loses the
+    # rightmost flat; time-signature digits remain excluded by glyph height.
+    region = arr[90:345, 195:430]
     luminance = region.mean(axis=2)
     neutral = region.max(axis=2) - region.min(axis=2) < 12
     local_background = float(np.median(luminance))
@@ -551,6 +647,40 @@ def detect_flat_key_signature_count(arr: np.ndarray) -> int:
 def detect_flat_key_signature(arr: np.ndarray) -> bool:
     """Backward-compatible boolean key-signature query."""
     return detect_flat_key_signature_count(arr) > 0
+
+
+def detect_sharp_key_signature_count(arr: np.ndarray) -> int:
+    """Count sharp glyphs between the clef and time signature.
+
+    A sharp is a wider, denser component than the flat glyphs in this score
+    theme. Keep the crop before the time signature so its digits cannot count.
+    """
+    # The right edge must also admit four or more sharps.  Time-signature
+    # digits are shorter than the sharp components in the captured theme.
+    region = arr[90:345, 195:430]
+    luminance = region.mean(axis=2)
+    neutral = region.max(axis=2) - region.min(axis=2) < 12
+    local_background = float(np.median(luminance))
+    glyph_threshold = min(205.0, local_background - 25.0)
+    labels, count = scipy.ndimage.label(neutral & (luminance < glyph_threshold))
+
+    sharp_count = 0
+    for label_id in range(1, count + 1):
+        ys, xs = np.where(labels == label_id)
+        if len(xs) < 900:
+            continue
+        width = int(xs.max() - xs.min() + 1)
+        height = int(ys.max() - ys.min() + 1)
+        if 37 <= width <= 55 and 55 <= height <= 90:
+            sharp_count += 1
+    return sharp_count
+
+
+def detect_key_signature_counts(arr: np.ndarray) -> tuple[int, int]:
+    """Return (flats, sharps), resolving the sharp/flat shape overlap."""
+    flats = detect_flat_key_signature_count(arr)
+    sharps = detect_sharp_key_signature_count(arr)
+    return (0, sharps) if sharps else (flats, 0)
 
 
 def notehead_component_label(
@@ -819,6 +949,7 @@ def analyze_screen_notes(
     max_x: int = 1520,
     has_flat_key_sig: bool = False,
     annotated_output_path: Path | None = None,
+    key_signature: tuple[int, int] | None = None,
 ) -> list[dict]:
     context = ensure_analysis_context(img)
     arr = context.arr
@@ -830,17 +961,14 @@ def analyze_screen_notes(
         # Start right at the judgment line (with a slight margin to capture notehead on/at the line)
         min_x = max(0, judgment_line_x - 10)
 
-    flat_count = detect_flat_key_signature_count(arr)
+    flat_count, sharp_count = (
+        key_signature if key_signature is not None
+        else detect_key_signature_counts(arr)
+    )
     if has_flat_key_sig:
         flat_count = max(flat_count, 1)
-    flat_pitch_classes = set(("B", "E", "A", "D", "G", "C", "F")[:flat_count])
-
     def signed_pitch(natural_pitch: str) -> str:
-        return (
-            f"{natural_pitch[0]}b{natural_pitch[1:]}"
-            if natural_pitch[0] in flat_pitch_classes
-            else natural_pitch
-        )
+        return apply_key_signature(natural_pitch, (flat_count, sharp_count))
 
     # 1. Staff lines: line 5 (top) to line 1 (bottom)
     line_5_y, line_4_y, line_3_y, line_2_y, line_1_y = context.staff_lines
@@ -849,6 +977,7 @@ def analyze_screen_notes(
     staff_right_x = find_staff_right_edge(arr, staff_ys)
 
     positions = {
+        signed_pitch("A5"): (line_5_y - step_y, "Ledger line 1 above"),
         signed_pitch("G5"): (line_5_y - step_y / 2.0, "Space above Line 5"),
         signed_pitch("F5"): (line_5_y, "Line 5"),
         signed_pitch("E5"): ((line_5_y + line_4_y) / 2.0, "Space 4"),
@@ -866,7 +995,7 @@ def analyze_screen_notes(
     }
 
     # 2. Find noteheads using 2D circular shape correlation to prevent stems/beams from throwing off X/Y
-    search_top = int(line_5_y - 25)
+    search_top = int(min(row for row, _ in positions.values()) - 25)
     search_bottom = int(line_1_y + 2.5 * step_y + 35)
 
     dark = (arr[search_top:search_bottom, :] < 130).all(axis=2).astype(float)
@@ -899,6 +1028,20 @@ def analyze_screen_notes(
         pitch_score[min_x:max_x], height=0.75, distance=45
     )
     raw_candidate_xs = [min_x + int(px) for px in peaks_x]
+    lower_rows = sorted({
+        row
+        for name, (expected_y, _description) in positions.items()
+        if name != signed_pitch("A5")
+        for row in range(
+            max(0, int(round(expected_y)) - 8 - search_top),
+            min(score.shape[0], int(round(expected_y)) + 9 - search_top),
+        )
+    })
+    lower_profile = score[lower_rows, :].max(axis=0)
+    lower_peaks, _ = scipy.signal.find_peaks(
+        lower_profile[min_x:max_x], height=0.75, distance=45
+    )
+    raw_candidate_xs.extend(min_x + int(px) for px in lower_peaks)
     candidate_xs = suppress_close_candidates(raw_candidate_xs, pitch_score)
 
     # 3. For each notehead X, extract true circular blob center
@@ -924,7 +1067,12 @@ def analyze_screen_notes(
         sub = arr[max(0, fy - 20) : min(h, fy + 25), max(0, fx - 22) : min(w, fx + 23)]
         sub_dark = (sub < 130).all(axis=2)
         row_spans = sub_dark.sum(axis=1)
-        c_rows = np.where(row_spans >= 16)[0]
+        # A touching down-stem flag widens the narrow edge rows below a filled
+        # head. Prefer its broad body so that the curl cannot shift the pitch;
+        # hollow or clipped heads retain the original narrow-row fallback.
+        c_rows = np.where(row_spans >= (30 if pitch_score[fx] >= 1.4 else 16))[0]
+        if len(c_rows) == 0:
+            c_rows = np.where(row_spans >= 16)[0]
         if len(c_rows) == 0:
             c_rows = np.where(row_spans >= 10)[0]
         if len(c_rows) == 0:
@@ -977,6 +1125,28 @@ def analyze_screen_notes(
         notehead_component_label(glyph_labels, note["x"], note["y"])
         for note in notes
     ]
+    # A flagged eighth note is one connected glyph.  Its curled flag can
+    # resemble a second, much higher notehead just to the right of the real
+    # one.  Adjacent beamed notes may also share a component, but their heads
+    # stay on the same staff row or are spaced farther apart.
+    flag_echo_indices = {
+        index
+        for index, candidate in enumerate(notes)
+        if component_labels[index] != 0
+        and any(
+            index != peer_index
+            and component_labels[index] == component_labels[peer_index]
+            and 20 <= candidate["x"] - peer["x"] <= 60
+            and candidate["y"] <= peer["y"] - 40
+            for peer_index, peer in enumerate(notes)
+        )
+    }
+    if flag_echo_indices:
+        notes = [note for index, note in enumerate(notes) if index not in flag_echo_indices]
+        component_labels = [
+            label for index, label in enumerate(component_labels)
+            if index not in flag_echo_indices
+        ]
     stems = [
         detect_note_stem(glyph_labels, component_label, note["x"], note["y"])
         for note, component_label in zip(notes, component_labels)
@@ -1233,6 +1403,7 @@ def analyze_image(
     *,
     out_annotated: Path | None = None,
     started_at: float | None = None,
+    key_signature: tuple[int, int] | None = None,
 ) -> dict:
     """Analyze one already-loaded frame."""
     if started_at is None:
@@ -1240,9 +1411,11 @@ def analyze_image(
     context = build_analysis_context(img)
     if context.staff_lines is None:
         raise ScoreNotVisibleError("five-line staff is not visible")
+    detected_key_signature = detect_key_signature_counts(context.arr)
     notes = analyze_screen_notes(
         context,
         annotated_output_path=out_annotated,
+        key_signature=key_signature or detected_key_signature,
     )
     rests = analyze_screen_rests(context)
     events = sorted([*notes, *rests], key=lambda event: event["x"])
@@ -1252,6 +1425,10 @@ def analyze_image(
     elapsed_ms = (time.perf_counter() - started_at) * 1000.0
     return {
         "elapsed_ms": elapsed_ms,
+        "key_signature": {
+            "flats": detected_key_signature[0],
+            "sharps": detected_key_signature[1],
+        },
         "notes": notes,
         "rests": rests,
         "events": events,

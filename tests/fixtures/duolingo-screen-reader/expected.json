@@ -118,7 +118,7 @@
     {
       "image": "two-flats-occluded-downstem.png",
       "sha256": "d320d11f2f32dc0bcaf16b5ba578b982905a6a76b53f23364899b97f560743f3",
-      "judgment_line_x": 444,
+      "judgment_line_x": 435,
       "events": [
         ["note", "Eb5", 1.0],
         ["note", "D5", 1.0],
@@ -133,7 +133,7 @@
     {
       "image": "single-flat-mixed-rhythm-and-edge-note.png",
       "sha256": "c82825db9580bb5b3a2d02b322261ff85c07587568f4068a987a6ada09e1bfd8",
-      "judgment_line_x": 412,
+      "judgment_line_x": 407,
       "known_duration_beats": 8.0,
       "events": [
         ["note", "C5", 0.5],

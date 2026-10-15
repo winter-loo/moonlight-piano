@@ -6,12 +6,10 @@ from pathlib import Path
 
 PLAN_PATH = (
     Path(__file__).parents[1]
-    / "outputs/duolingo-stage4-section2-tonight/tonight-frozen-plan.json"
+    / "tests/fixtures/duolingo-frozen-plans/tonight-frozen-plan.json"
 )
-HAVE_PLAN = PLAN_PATH.exists()
 
 
-@unittest.skipUnless(HAVE_PLAN, "captured Tonight plan is not present in this checkout")
 class TonightFrozenPlanTest(unittest.TestCase):
     def setUp(self):
         self.plan = json.loads(PLAN_PATH.read_text(encoding="utf-8"))

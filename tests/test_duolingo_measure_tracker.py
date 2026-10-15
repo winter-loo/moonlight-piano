@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import unittest
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -47,6 +47,62 @@ def load_rows():
 
 
 class MeasureBarlineDetectionTest(unittest.TestCase):
+    def test_two_beat_measure_uses_adjacent_barlines(self):
+        candidate = tracker_module.BarlineCandidate
+        barlines = (
+            candidate(758.0, 1.0, 5),
+            candidate(1046.0, 1.0, 5),
+            candidate(1334.0, 1.0, 5),
+        )
+        self.assertEqual(288.0, tracker_module.infer_measure_spacing(barlines))
+
+    def test_barline_remains_visible_when_note_occludes_a_third_of_its_height(self):
+        image = Image.new("RGB", (800, 260), (255, 255, 252))
+        draw = ImageDraw.Draw(image)
+        staff_lines = (70, 100, 130, 160, 190)
+        for y in staff_lines:
+            draw.rectangle((80, y - 2, 720, y + 2), fill=(217, 217, 217))
+        draw.rectangle((300, 70, 305, 190), fill=(217, 217, 217))
+        draw.rectangle((300, 117, 305, 150), fill=(74, 74, 74))
+        draw.rectangle((500, 70, 513, 190), fill=(74, 74, 74))
+
+        positions = [
+            candidate.x for candidate in tracker_module.detect_measure_barline_candidates(
+                image, staff_lines, 350,
+            )
+        ]
+        self.assertIn(300.0, positions)
+        self.assertNotIn(500.0, positions)
+
+    def test_barline_at_judgment_line_keeps_staff_color_not_note_stem(self):
+        image = Image.new("RGB", (800, 260), (255, 255, 252))
+        draw = ImageDraw.Draw(image)
+        staff_lines = (70, 100, 130, 160, 190)
+        for y in staff_lines:
+            draw.rectangle((80, y - 2, 720, y + 2), fill=(217, 217, 217))
+        draw.rectangle((398, 40, 404, 220), fill=(169, 184, 240))
+        draw.rectangle((414, 70, 419, 190), fill=(217, 217, 217))
+        draw.rectangle((600, 40, 613, 190), fill=(74, 74, 74))
+        draw.rectangle((414, 145, 419, 153), fill=(184, 194, 228))
+
+        candidates = tracker_module.detect_measure_barline_candidates(
+            image, staff_lines, 401,
+        )
+        positions = [candidate.x for candidate in candidates]
+        self.assertTrue(any(abs(x - 414) <= 2 for x in positions), positions)
+        self.assertFalse(any(abs(x - 600) <= 2 for x in positions), positions)
+        self.assertFalse(any(abs(x - 398) <= 2 for x in positions), positions)
+
+        # Even a gray judgment line is taller than a barline.
+        draw.rectangle((398, 40, 404, 220), fill=(217, 217, 217))
+        positions = [
+            candidate.x for candidate in tracker_module.detect_measure_barline_candidates(
+                image, staff_lines, 401,
+            )
+        ]
+        self.assertTrue(any(abs(x - 414) <= 2 for x in positions), positions)
+        self.assertFalse(any(abs(x - 398) <= 2 for x in positions), positions)
+
     def test_detects_periodic_barlines_without_note_stems_or_judgment_line(self):
         row = load_rows()[0]
         image = Image.open(FIXTURE_ROOT / row["image"]).convert("RGB")
@@ -66,11 +122,38 @@ class MeasureBarlineDetectionTest(unittest.TestCase):
 
 
 class MeasureLineTrackerTest(unittest.TestCase):
+    def test_slow_leftward_scroll_after_frame_gap_is_not_a_reset(self):
+        candidate = tracker_module.BarlineCandidate
+        tracker = tracker_module.MeasureLineTracker(spacing_px=576.0)
+        for index in range(10):
+            x = 1000.0 - 32.0 * index
+            tracker.update(
+                index * 100_000_000,
+                [candidate(x, 1.0, 5), candidate(x + 576.0, 1.0, 5)],
+            )
+
+        positions = []
+        states = []
+        for timestamp, x in (
+            (1_275_000_000, 687.0),
+            (1_350_000_000, 665.0),
+            (1_420_000_000, 640.0),
+        ):
+            update = tracker.update(
+                timestamp,
+                [candidate(x, 1.0, 5), candidate(x + 576.0, 1.0, 5)],
+            )
+            positions.append(update.phase_px)
+            states.append(update.state)
+
+        self.assertNotIn("resetting", states)
+        self.assertEqual([687.0, 665.0, 640.0], positions)
+
     def test_tracks_real_fixture_and_recovers_stable_scroll_speed(self):
         rows = load_rows()
         tracker = tracker_module.MeasureLineTracker()
         updates = []
-        for row in rows[:34]:
+        for row in rows[:35]:
             image = Image.open(FIXTURE_ROOT / row["image"]).convert("RGB")
             candidates = tracker_module.detect_measure_barline_candidates(
                 image,
@@ -97,7 +180,8 @@ class MeasureLineTrackerTest(unittest.TestCase):
         self.assertIn(1, ids_by_frame[0])
         self.assertIn(1, ids_by_frame[10])
         self.assertEqual({2, 3}, ids_by_frame[25])
-        self.assertEqual("resetting", updates[32].state)
+        self.assertEqual(["missing", "missing", "resetting"],
+                         [update.state for update in updates[32:35]])
 
     def test_missing_frame_preserves_phase_and_line_identity(self):
         candidate = tracker_module.BarlineCandidate
@@ -116,6 +200,48 @@ class MeasureLineTrackerTest(unittest.TestCase):
         self.assertEqual(first.phase_px, missing.phase_px)
         self.assertEqual([0, 1], [line.line_id for line in recovered.barlines])
         self.assertAlmostEqual(-280.0, recovered.instantaneous_speed_px_s)
+
+    def test_one_spurious_barline_is_ignored_but_persistent_jump_resets(self):
+        candidate = tracker_module.BarlineCandidate
+        tracker = tracker_module.MeasureLineTracker(spacing_px=432.0)
+        for index in range(12):
+            x = 700.0 - 18.0 * index
+            tracker.update(
+                index * 100_000_000,
+                [candidate(x, 1.0, 4), candidate(x + 432.0, 1.0, 4)],
+            )
+        outlier = tracker.update(
+            1_200_000_000,
+            [candidate(602.0, 1.0, 4), candidate(1034.0, 1.0, 4)],
+        )
+        recovered = tracker.update(
+            1_300_000_000,
+            [candidate(466.0, 1.0, 4), candidate(898.0, 1.0, 4)],
+        )
+        self.assertEqual("missing", outlier.state)
+        self.assertAlmostEqual(466.0, recovered.phase_px)
+        self.assertNotEqual("resetting", recovered.state)
+        for index in range(3):
+            reset = tracker.update(
+                (14 + index) * 100_000_000,
+                [candidate(600.0, 1.0, 4), candidate(1032.0, 1.0, 4)],
+            )
+        self.assertEqual("resetting", reset.state)
+
+    def test_two_startup_reversals_do_not_reset_real_leftward_scroll(self):
+        candidate = tracker_module.BarlineCandidate
+        tracker = tracker_module.MeasureLineTracker(spacing_px=432.0)
+        phases = [810.0, 810.0, 806.0, 790.0, 804.0, 796.0, 784.0]
+        states = []
+        for index, phase in enumerate(phases):
+            update = tracker.update(
+                index * 70_000_000,
+                [candidate(phase, 1.0, 4), candidate(phase + 432.0, 1.0, 4)],
+            )
+            states.append(update.state)
+        self.assertEqual(["missing", "missing"], states[4:6])
+        self.assertNotEqual("resetting", states[6])
+        self.assertEqual(784.0, update.phase_px)
 
 
 class MeasureTempoEstimatorTest(unittest.TestCase):

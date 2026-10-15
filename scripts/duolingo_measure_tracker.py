@@ -64,9 +64,9 @@ def detect_measure_barline_candidates(
     staff_lines: Sequence[int],
     judgment_line_x: int,
     *,
-    minimum_coverage: float = 0.93,
+    minimum_coverage: float = 0.60,
 ) -> tuple[BarlineCandidate, ...]:
-    """Find neutral vertical strokes spanning nearly the full staff height."""
+    """Find staff-colored barlines, allowing noteheads to cover part of them."""
     if len(staff_lines) != 5:
         raise ValueError("exactly five staff lines are required")
 
@@ -78,24 +78,32 @@ def detect_measure_barline_candidates(
     for staff_y in staff_lines:
         usable_rows &= np.abs(y_values - int(staff_y)) > 4
 
-    staff_strip = array[y_values[usable_rows], :, :]
-    luminance = staff_strip.mean(axis=2)
-    channel_spread = staff_strip.max(axis=2) - staff_strip.min(axis=2)
-    neutral_ink = (luminance < 245) & (channel_spread < 16)
-    coverage = neutral_ink.mean(axis=0)
-
     width = image.width
     minimum_x = round(width * 0.08)
     maximum_x = round(width * 0.92)
-    judgment_exclusion = 18
+    staff_color = np.median(
+        array[np.asarray(staff_lines), minimum_x : maximum_x + 1, :],
+        axis=(0, 1),
+    )
+    staff_strip = array[y_values[usable_rows], :, :]
+    staff_ink = np.max(
+        np.abs(staff_strip.astype(np.int16) - staff_color), axis=2,
+    ) <= 22
+    coverage = staff_ink.mean(axis=0)
+
     eligible = coverage >= minimum_coverage
     eligible[:minimum_x] = False
     eligible[maximum_x + 1 :] = False
-    eligible[
-        max(0, judgment_line_x - judgment_exclusion) : min(
-            width, judgment_line_x + judgment_exclusion + 1
-        )
-    ] = False
+    # A judgment line continues outside the staff. A barline ends at its edges.
+    for outside in (
+        array[max(0, staff_top - 12) : max(0, staff_top - 4)],
+        array[min(image.height, staff_bottom + 5) : min(image.height, staff_bottom + 13)],
+    ):
+        if len(outside):
+            continuation = np.max(
+                np.abs(outside.astype(np.int16) - staff_color), axis=2,
+            ) <= 22
+            eligible &= continuation.mean(axis=0) < 0.5
 
     candidates: list[BarlineCandidate] = []
     start: int | None = None
@@ -107,10 +115,9 @@ def detect_measure_barline_candidates(
             stop = x
             group = coverage[start:stop]
             strongest_offset = int(np.argmax(group))
-            strongest_x = start + strongest_offset
             candidates.append(
                 BarlineCandidate(
-                    x=float(strongest_x),
+                    x=float(start),
                     coverage=float(group[strongest_offset]),
                     width=stop - start,
                 )
@@ -122,7 +129,7 @@ def detect_measure_barline_candidates(
 def infer_measure_spacing(
     candidates: Sequence[BarlineCandidate],
     *,
-    minimum_spacing: float = 400.0,
+    minimum_spacing: float = 250.0,
     maximum_spacing: float = 800.0,
     tolerance: float = 8.0,
 ) -> float | None:
@@ -188,17 +195,19 @@ class MeasureLineTracker:
         spacing_tolerance_px: float = 8.0,
         steady_r_squared: float = 0.98,
         moving_speed_threshold_px_s: float = 30.0,
+        initial_phase_px: float | None = None,
     ) -> None:
         self.spacing_px = spacing_px
         self._spacing_tolerance_px = spacing_tolerance_px
         self._steady_r_squared = steady_r_squared
         self._moving_speed_threshold_px_s = moving_speed_threshold_px_s
         self._history: deque[tuple[int, float]] = deque(maxlen=history_size)
-        self._phase_px: float | None = None
+        self._phase_px: float | None = initial_phase_px
         self._timestamp_ns: int | None = None
         self._last_input_timestamp_ns: int | None = None
         self._fitted_speed_px_s: float | None = None
         self._missing_frames = 0
+        self._discontinuity_frames = 0
 
     def update(
         self,
@@ -261,6 +270,54 @@ class MeasureLineTracker:
                 for candidate in selected
             ]
             phase_px = float(np.median(mapped_phases))
+
+        if (
+            reference_phase is not None
+            and self._phase_px is not None
+            and self._fitted_speed_px_s is not None
+            and self._fitted_speed_px_s < -self._moving_speed_threshold_px_s
+            and len(self._history) >= 4
+            and abs(phase_px - reference_phase) > self.spacing_px / 8
+            and not (reference_phase < phase_px < self._phase_px)
+        ):
+            # A single spurious vertical stroke can win the barline-chain
+            # selection. Do not let it relabel every following measure. A
+            # slower-than-predicted frame that still moved left, however, is
+            # not a reset: accept it and refit the speed after the frame gap.
+            self._discontinuity_frames += 1
+            self._missing_frames += 1
+            return MeasureTrackUpdate(
+                timestamp_ns=timestamp_ns,
+                state=("resetting" if self._discontinuity_frames >= 3 else "missing"),
+                spacing_px=self.spacing_px,
+                phase_px=self._phase_px,
+                instantaneous_speed_px_s=None,
+                fitted_speed_px_s=self._fitted_speed_px_s,
+                fit_r_squared=None,
+                candidates=tuple(candidates),
+                barlines=(),
+                missing_frames=self._missing_frames,
+            )
+        if self._phase_px is not None and self._timestamp_ns is not None:
+            if phase_px - self._phase_px > self.spacing_px / 100:
+                # A decoder/line-detection wobble can make one frame appear
+                # to move right. Require a sustained reversal before calling
+                # it a score reset, just as with a large phase jump above.
+                self._discontinuity_frames += 1
+                self._missing_frames += 1
+                return MeasureTrackUpdate(
+                    timestamp_ns=timestamp_ns,
+                    state=("resetting" if self._discontinuity_frames >= 3 else "missing"),
+                    spacing_px=self.spacing_px,
+                    phase_px=self._phase_px,
+                    instantaneous_speed_px_s=None,
+                    fitted_speed_px_s=self._fitted_speed_px_s,
+                    fit_r_squared=None,
+                    candidates=tuple(candidates),
+                    barlines=(),
+                    missing_frames=self._missing_frames,
+                )
+        self._discontinuity_frames = 0
 
         instantaneous_speed: float | None = None
         if self._phase_px is not None and self._timestamp_ns is not None:

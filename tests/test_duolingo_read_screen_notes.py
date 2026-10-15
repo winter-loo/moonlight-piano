@@ -32,6 +32,33 @@ reader = _load_reader()
 
 
 class AdbDevicePreflightTest(unittest.TestCase):
+    def test_h264_warmup_accepts_fresh_frames_delivered_in_batches(self):
+        pump = reader.H264FramePump("adb", "oppo-serial", output_fps=10,
+                                    warmup_frames=20)
+        pump._sequence = 222
+        pump._latest_arrival_ns = 102_000_000_000
+        pump._stable_intervals = 0
+        with (
+            mock.patch.object(reader.time, "monotonic", side_effect=(100.0, 102.1)),
+            mock.patch.object(reader.time, "monotonic_ns", return_value=102_100_000_000),
+        ):
+            pump._wait_until_ready(timeout=0)
+
+    def test_h264_archive_copies_the_same_bytes_to_decoder_and_disk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "recording.h264"
+            pump = reader.H264FramePump("adb", "oppo-serial", archive_path=archive)
+            pump._encoder = mock.Mock(stdout=io.BufferedReader(io.BytesIO(b"h264-frame")))
+            decoder_input = mock.Mock()
+            pump._decoder = mock.Mock(stdin=decoder_input)
+            pump._archive_stream = archive.open("wb")
+
+            pump._archive_h264()
+
+            self.assertEqual(b"h264-frame", archive.read_bytes())
+            decoder_input.write.assert_called_once_with(b"h264-frame")
+            decoder_input.close.assert_called_once()
+
     def test_accepts_only_the_exact_online_device(self):
         completed = mock.Mock(
             stdout=(
@@ -77,6 +104,30 @@ class CandidateSuppressionTest(unittest.TestCase):
 
 
 class HollowNoteCenterTest(unittest.TestCase):
+    def test_hollow_refinement_limits_dark_pixel_work_to_candidate_region(self):
+        comparisons = []
+
+        class MeasuredArray(np.ndarray):
+            def __new__(cls, pixels):
+                result = np.asarray(pixels).view(cls)
+                result.comparisons = comparisons
+                return result
+
+            def __array_finalize__(self, source):
+                self.comparisons = getattr(source, "comparisons", None)
+
+            def __lt__(self, value):
+                self.comparisons.append(self.size)
+                return super().__lt__(value)
+
+        image = MeasuredArray(np.full((720, 1612, 3), 255, dtype=np.uint8))
+        reader.refine_hollow_notehead_center(
+            image, candidate_x=800, rough_center_y=260,
+            positions={"G4": (260.0, "Line 2")},
+        )
+        self.assertTrue(comparisons)
+        self.assertLess(max(comparisons), 100_000)
+
     def test_uses_hollow_ellipse_instead_of_stem_weight_for_pitch(self):
         image = Image.new("RGB", (500, 420), "white")
         draw = ImageDraw.Draw(image)
@@ -195,6 +246,53 @@ class BidirectionalStemAndBeamTest(unittest.TestCase):
 
 
 class OccludedStemAndKeySignatureTest(unittest.TestCase):
+    def test_four_flats_include_d_flat_and_can_be_locked_for_later_frames(self):
+        image = np.asarray(Image.open(
+            FIXTURE_DIR / "four-flats-opening.png"
+        ).convert("RGB"))
+        self.assertEqual((4, 0), reader.detect_key_signature_counts(image))
+        notes = reader.analyze_screen_notes(Image.fromarray(image))
+        self.assertIn("Db5", [note["pitch"] for note in notes])
+
+        without_signature = image.copy()
+        without_signature[90:345, 195:350] = 255
+        locked_notes = reader.analyze_screen_notes(
+            Image.fromarray(without_signature), key_signature=(4, 0),
+        )
+        self.assertIn("Db5", [note["pitch"] for note in locked_notes])
+
+    def test_two_sharps_override_flat_shape_overlap(self):
+        image = np.asarray(Image.open(
+            FIXTURE_DIR / "two-sharps-opening.png"
+        ).convert("RGB"))
+        self.assertEqual((0, 2), reader.detect_key_signature_counts(image))
+        self.assertIn("C#5", [
+            note["pitch"] for note in reader.analyze_screen_notes(
+                Image.fromarray(image)
+            )
+        ])
+
+    def test_four_sharps_are_read_past_old_crop_boundary(self):
+        image = np.asarray(Image.open(
+            FIXTURE_DIR / "two-sharps-opening.png"
+        ).convert("RGB"))
+        extended = image.copy()
+        # Repeat the captured sharp glyph in the two slots beyond x=360.
+        # Clear the original time signature, as the score would shift it right.
+        extended[90:345, 317:430] = 255
+        extended[90:345, 316:357] = image[90:345, 276:317]
+        extended[90:345, 356:397] = image[90:345, 276:317]
+        self.assertEqual((0, 4), reader.detect_key_signature_counts(extended))
+
+    def test_two_flats_when_upper_flat_is_high_on_staff(self):
+        image = np.asarray(Image.open(
+            FIXTURE_DIR / "two-flats-occluded-downstem.png"
+        ).convert("RGB"))
+        shifted = np.full_like(image, 255)
+        shifted[:-38] = image[38:]
+
+        self.assertEqual(2, reader.detect_flat_key_signature_count(shifted))
+
     def test_two_flats_and_judgment_line_occluded_downstem(self):
         image = Image.open(
             FIXTURE_DIR / "two-flats-occluded-downstem.png"
@@ -508,6 +606,14 @@ class WatchModeTest(unittest.TestCase):
 
 
 class RealScreenRegressionTest(unittest.TestCase):
+    def test_downstem_flags_do_not_pull_filled_heads_to_the_next_staff_step(self):
+        image = Image.open(FIXTURE_DIR / "downstem-flag-pitch-shift.png").convert("RGB")
+        notes = reader.analyze_screen_notes(image)
+        self.assertEqual(
+            [("C5", 1.0), ("C5", 0.5), ("Bb4", 0.5), ("C5", 0.5), ("Eb5", 0.5)],
+            [(note["pitch"], note["duration_beats"]) for note in notes],
+        )
+
     def test_manually_verified_screen_events(self):
         manifest = json.loads((FIXTURE_DIR / "expected.json").read_text())
         for case in manifest["cases"]:
@@ -516,6 +622,8 @@ class RealScreenRegressionTest(unittest.TestCase):
                 self.assertEqual(case["sha256"], hashlib.sha256(image_path.read_bytes()).hexdigest())
                 image = Image.open(image_path).convert("RGB")
                 located_line = reader.locate_judgment_line(np.array(image))
+                # The center of the pale vertical band is the timing line;
+                # a dark notehead touching it can bias a glyph-based label.
                 self.assertAlmostEqual(case["judgment_line_x"], located_line, delta=2)
 
                 notes = reader.analyze_screen_notes(image)

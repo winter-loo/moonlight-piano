@@ -17,9 +17,9 @@ from unittest import mock
 
 
 REPO_ROOT = Path(__file__).parents[1]
-OUTPUT_DIR = REPO_ROOT / "outputs/duolingo-stage4-section14-musette/ultimate"
-CORRECTED_PLAN_PATH = OUTPUT_DIR / "musette-corrected-frozen-plan.json"
-SUPERSEDED_PLAN_PATH = OUTPUT_DIR / "musette-frozen-plan.json"
+FIXTURE_DIR = REPO_ROOT / "tests/fixtures/duolingo-frozen-plans"
+CORRECTED_PLAN_PATH = FIXTURE_DIR / "musette-corrected-frozen-plan.json"
+SUPERSEDED_PLAN_PATH = FIXTURE_DIR / "musette-frozen-plan.json"
 
 
 def _load_player():
@@ -36,14 +36,6 @@ def _load_player():
 player = _load_player()
 
 MS = 1_000_000
-
-# ``/outputs`` is gitignored, so a fresh clone has the scripts but not the
-# captured plans.  The gate logic above still runs; only the replays skip.
-HAVE_PLANS = CORRECTED_PLAN_PATH.exists() and SUPERSEDED_PLAN_PATH.exists()
-requires_plans = unittest.skipUnless(
-    HAVE_PLANS, "captured frozen plans are not present in this checkout"
-)
-
 
 class PlaybackGateTest(unittest.TestCase):
     def test_admits_events_inside_the_boundary(self):
@@ -222,7 +214,6 @@ class RecordingInputShell:
         return [(pitch, seq) for kind, pitch, seq in self.sent if kind == "UP"]
 
 
-@requires_plans
 class FrozenPlanGateIntegrationTest(unittest.TestCase):
     """Drive ``run_frozen_plan`` end to end with no device attached."""
 
@@ -242,6 +233,7 @@ class FrozenPlanGateIntegrationTest(unittest.TestCase):
             last_valid_event_index=None,
             stop_after_beat=None,
             output_dir=Path(tmp_dir),
+            frozen_visual_log=False,
         )
         for key, value in overrides.items():
             setattr(args, key, value)

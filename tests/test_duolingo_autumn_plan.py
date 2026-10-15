@@ -6,11 +6,11 @@ from pathlib import Path
 
 PLAN_PATH = (
     Path(__file__).parents[1]
-    / "outputs/duolingo-stage4-section1-autumn/autumn-frozen-plan.json"
+    / "tests/fixtures/duolingo-frozen-plans/autumn-frozen-plan.json"
 )
 
 # Independent 4/4 transcription used as the timing oracle, taken from
-# docs/practiced-songs/autumn.md.  ``None`` denotes a rest so every measure
+# docs/practiced-songs/001-autumn.md.  ``None`` denotes a rest so every measure
 # documents all four beats, not just the notes sent to Android.
 #
 # Bar 1's A4 is the launch note: the challenge prints "在琴键上弹 A 开始" and
@@ -32,9 +32,6 @@ MEASURES = (
     (("F4", 2), (None, 2)),
 )
 
-HAVE_PLAN = PLAN_PATH.exists()
-
-
 def transcribed_events():
     events = []
     beat = 0.0
@@ -50,7 +47,6 @@ def transcribed_events():
     return events
 
 
-@unittest.skipUnless(HAVE_PLAN, "captured Autumn plan is not present in this checkout")
 class AutumnFrozenPlanTest(unittest.TestCase):
     def setUp(self):
         self.plan = json.loads(PLAN_PATH.read_text(encoding="utf-8"))

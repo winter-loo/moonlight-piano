@@ -73,6 +73,9 @@ public final class CodexInputBridge {
             MotionEvent event = MotionEvent.obtain(
                     activeDownTime, eventTime, action, x, y, 0);
             event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+            // Wait until the app has handled each edge. Faster ACK modes
+            // returned before the game judged the touch and reduced scores
+            // in device runs, so an ACK must retain its delivery meaning.
             boolean accepted = (Boolean) inject.invoke(
                     inputManager, event, INJECT_WAIT_FOR_FINISH);
             event.recycle();
