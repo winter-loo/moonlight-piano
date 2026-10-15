@@ -20,6 +20,7 @@ from pathlib import Path
 
 def find_font_dir() -> Path:
     candidates = [
+        Path(__file__).resolve().parents[1] / "public" / "fonts",
         Path("/Users/ldd/proj/lab-piano/meloo-font"),
         Path("/Users/ldd/proj/meloo-rounded"),
         Path(__file__).resolve().parents[1].parent / "meloo-font",
@@ -413,7 +414,8 @@ def generate_grand_staff_html() -> str:
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bicycle Built for Two (双手大谱表) — Meloo Rounded SMuFL</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+  <script src="../../public/audio/score-piano-controller.js"></script>
   <style>
     @font-face {{
       font-family: 'MelooRounded';
@@ -685,7 +687,8 @@ def generate_grand_staff_html() -> str:
 
       <div class="track-selector">
         <span style="font-size:12px; color:var(--text-muted); margin: 0 6px;">音色:</span>
-        <button class="track-btn active" id="timbre-grand" onclick="setTimbre('grand')">三角钢琴 (Grand)</button>
+        <button class="track-btn active" id="timbre-basic" onclick="setTimbre('basic')">Rust 基础钢琴</button>
+        <button class="track-btn" id="timbre-grand" onclick="setTimbre('grand')">原有合成 (Grand)</button>
         <button class="track-btn" id="timbre-warm" onclick="setTimbre('warm')">温暖原声 (Warm)</button>
         <button class="track-btn" id="timbre-bright" onclick="setTimbre('bright')">明亮立式 (Bright)</button>
         <button class="track-btn" id="timbre-sampled" onclick="setTimbre('sampled')">真实采样 (Tone.js)</button>
@@ -693,7 +696,7 @@ def generate_grand_staff_html() -> str:
 
       <div class="slider-group">
         <span>共鸣箱:</span>
-        <input type="range" id="reverb-slider" min="0" max="60" value="28" oninput="updateReverb(this.value)">
+        <input type="range" id="reverb-slider" min="0" max="60" value="28" disabled title="Rust 基础钢琴使用内置琴体响应；此调节用于其他音色" oninput="updateReverb(this.value)">
         <span id="reverb-text" style="color:var(--accent); font-weight:bold; font-family:monospace;">28%</span>
       </div>
 
@@ -711,7 +714,7 @@ def generate_grand_staff_html() -> str:
 
     <!-- Status Bar -->
     <div class="status-bar">
-      <div>当前小节: <strong id="cur-measure" style="color:var(--accent);">1</strong> / 34 | 音频引擎: <strong id="engine-status" style="color:var(--accent);">物理建模三角钢琴 (Soundboard Convolver)</strong></div>
+      <div>当前小节: <strong id="cur-measure" style="color:var(--accent);">1</strong> / 34 | 音频引擎: <strong id="engine-status" style="color:var(--accent);" aria-live="polite">Rust 基础钢琴（点击播放或音符加载）</strong></div>
       <div style="font-family:monospace; color:var(--text-muted);">Meloo Rounded SMuFL 大谱表 | 支持点击任意音符单音/和弦试听</div>
     </div>
 
@@ -1203,11 +1206,47 @@ def generate_grand_staff_html() -> str:
     }}
 
     const pianoEngine = new AcousticPianoEngine();
+    const basicPiano = new BasicScorePiano();
+    let selectedTimbre = 'basic';
+    let audioAttempt = 0;
+    let previewAttempt = 0;
 
-    function playSingleNote(pitch, durBeats) {{
+    function showAudioError(error) {{
+      const detail = error instanceof Error ? error.message : String(error);
+      document.getElementById('engine-status').textContent = selectedTimbre === 'basic'
+        ? `Rust 钢琴加载失败：${{detail}}。请通过 localhost/HTTPS 打开并构建音频资源，或选择其他音色。`
+        : `音频不可用：${{detail}}`;
+    }}
+
+    async function ensureScoreEngine() {{
+      if (selectedTimbre === 'basic') {{
+        document.getElementById('engine-status').textContent = 'Rust 基础钢琴加载中…';
+        await basicPiano.start();
+        document.getElementById('engine-status').textContent = 'Rust 基础钢琴 · 88 键 / 32 发声按键';
+        return basicPiano.context;
+      }}
+      const context = pianoEngine.ensureContext();
+      if (context.state === 'suspended') await context.resume();
+      return context;
+    }}
+
+    function playScoreNote(pitch, duration, volume, hand, when = 0) {{
+      const engine = selectedTimbre === 'basic' ? basicPiano : pianoEngine;
+      engine.playNote(pitch, duration, volume, hand, when);
+    }}
+
+    async function playSingleNote(pitch, durBeats) {{
       if (!pitch) return;
-      const beatSec = 60.0 / currentBPM;
-      pianoEngine.playNote(pitch, durBeats * beatSec, 0.46, 'rh', 0);
+      const attempt = audioAttempt;
+      const preview = ++previewAttempt;
+      try {{
+        await ensureScoreEngine();
+        if (attempt !== audioAttempt || preview !== previewAttempt) return;
+        const beatSec = 60.0 / currentBPM;
+        playScoreNote(pitch, durBeats * beatSec, 0.46, 'rh', 0);
+      }} catch (error) {{
+        if (attempt === audioAttempt && preview === previewAttempt) showAudioError(error);
+      }}
     }}
 
     function highlightMeasure(measureNum) {{
@@ -1248,15 +1287,16 @@ def generate_grand_staff_html() -> str:
 
       highlightMeasure(measureNum);
 
-      const ctx = pianoEngine.ensureContext();
-      const measureStartAudioTime = ctx.currentTime;
+      const ctx = selectedTimbre === 'basic' ? basicPiano.context : pianoEngine.ensureContext();
+      // Give the Worklet time to receive the first absolute-frame onset.
+      const measureStartAudioTime = ctx.currentTime + 0.06;
 
       // Play Right Hand (Sample-accurate hardware audio scheduling)
       if (activeTrack === 'both' || activeTrack === 'rh') {{
         mRH.events.forEach(ev => {{
           if (ev.type === 'note') {{
             const noteStart = measureStartAudioTime + ev.beat * beatSec;
-            pianoEngine.playNote(ev.pitch, ev.durationBeats * beatSec, 0.44, 'rh', noteStart);
+            playScoreNote(ev.pitch, ev.durationBeats * beatSec, 0.44, 'rh', noteStart);
           }}
         }});
       }}
@@ -1266,16 +1306,17 @@ def generate_grand_staff_html() -> str:
         mLH.events.forEach(ev => {{
           if (ev.type === 'note') {{
             const noteStart = measureStartAudioTime + ev.beat * beatSec;
-            pianoEngine.playNote(ev.pitch, ev.durationBeats * beatSec * 0.96, 0.38, 'lh', noteStart);
+            playScoreNote(ev.pitch, ev.durationBeats * beatSec * 0.96, 0.38, 'lh', noteStart);
           }}
         }});
       }}
 
       currentMeasureIdx++;
-      playbackTimeoutId = setTimeout(stepMeasurePlayback, measureSec * 1000);
+      const finalLead = currentMeasureIdx === RIGHT_HAND.length ? 0.06 : 0;
+      playbackTimeoutId = setTimeout(stepMeasurePlayback, (measureSec + finalLead) * 1000);
     }}
 
-    function togglePlay() {{
+    async function togglePlay() {{
       const btn = document.getElementById('btn-play');
       if (isPlaying) {{
         stopPlayback(false);
@@ -1284,21 +1325,35 @@ def generate_grand_staff_html() -> str:
           currentMeasureIdx = 0;
         }}
         isPlaying = true;
-        btn.textContent = '⏸ 暂停 (Pause)';
+        const attempt = ++audioAttempt;
+        ++previewAttempt;
+        btn.textContent = '⏸ 加载中（点击取消）';
         btn.style.background = '#f59e0b';
-        pianoEngine.ensureContext();
-        pianoEngine.prewarm(['F2', 'G2', 'A2', 'C3', 'D3', 'C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4']);
-        stepMeasurePlayback();
+        try {{
+          await ensureScoreEngine();
+          if (attempt !== audioAttempt || !isPlaying) return;
+          btn.textContent = '⏸ 暂停 (Pause)';
+          if (selectedTimbre !== 'basic') pianoEngine.prewarm(['F2', 'G2', 'A2', 'C3', 'D3', 'C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4']);
+          stepMeasurePlayback();
+        }} catch (error) {{
+          if (attempt !== audioAttempt) return;
+          stopPlayback(false);
+          showAudioError(error);
+        }}
       }}
     }}
 
     function stopPlayback(reset = false) {{
+      ++audioAttempt;
+      ++previewAttempt;
       isPlaying = false;
       if (playbackTimeoutId) {{
         clearTimeout(playbackTimeoutId);
         playbackTimeoutId = null;
       }}
       pianoEngine.stopAll();
+      basicPiano.stopAll();
+      if (selectedTimbre === 'basic') document.getElementById('engine-status').textContent = 'Rust 基础钢琴（已停止）';
       if (reset) {{
         currentMeasureIdx = 0;
         const curMeasEl = document.getElementById('cur-measure');
@@ -1317,12 +1372,18 @@ def generate_grand_staff_html() -> str:
     }}
 
     function setTimbre(mode) {{
+      if (!['basic', 'grand', 'warm', 'bright', 'sampled'].includes(mode)) return;
+      stopPlayback(false);
+      if (selectedTimbre === 'basic' && mode !== 'basic') void basicPiano.dispose();
+      selectedTimbre = mode;
       pianoEngine.setTimbre(mode);
+      document.getElementById('reverb-slider').disabled = mode === 'basic';
       document.querySelectorAll('[id^=\"timbre-\"]').forEach(btn => btn.classList.remove('active'));
       const activeBtn = document.getElementById('timbre-' + mode);
       if (activeBtn) activeBtn.classList.add('active');
       const names = {{
-        grand: '物理建模三角钢琴 (Concert Grand)',
+        basic: 'Rust 基础钢琴（点击播放或音符加载）',
+        grand: '原有 JavaScript 合成 (Grand)',
         warm: '录音室温暖原声 (Studio Warm)',
         bright: '原声立式钢琴 (Bright Upright)',
         sampled: pianoEngine.isSamplerReady ? '真实录音采样 (Tone.js Salamander Grand)' : '真实录音采样 (Tone.js 正在预载音频样本...)'
@@ -1331,12 +1392,10 @@ def generate_grand_staff_html() -> str:
       if (statusEl) statusEl.textContent = names[mode] || mode;
     }}
 
-    // Preload Tone.js sampler in background after page load
-    setTimeout(() => {{
-      if (typeof Tone !== 'undefined') {{
-        pianoEngine.initToneSampler();
-      }}
-    }}, 1200);
+    window.addEventListener('pagehide', () => {{
+      stopPlayback(false);
+      void basicPiano.dispose();
+    }});
 
     function updateReverb(val) {{
       pianoEngine.setReverb(Number(val));
@@ -1346,7 +1405,7 @@ def generate_grand_staff_html() -> str:
 
     function setTrack(track) {{
       activeTrack = track;
-      document.querySelectorAll('.track-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('[id^="track-"]').forEach(btn => btn.classList.remove('active'));
       document.getElementById('track-' + track).classList.add('active');
     }}
 

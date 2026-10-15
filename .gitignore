@@ -45,6 +45,8 @@ next-env.d.ts
 /target/
 /Cargo.lock
 /public/audio/moonlight_wasm.wasm
+/public/audio/sound-engine.js
+/public/audio/physical-c4-worklet-engine.js
 
 # python & tools cache
 __pycache__/

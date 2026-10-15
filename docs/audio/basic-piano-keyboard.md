@@ -8,6 +8,19 @@ The home screen keyboard and B1-01 listening/echo lesson expose a basic-piano
 choice through the same SoundEngine contract. They wait for WASM readiness
 before the first note and return visibly to the legacy sound if startup fails.
 
+The standalone `docs/practiced-songs/bicycle-built-for-two-grand-staff.html`
+also defaults to **Rust 基础钢琴**, for both-hand playback and clicked-note previews.
+`npm run audio:wasm` builds the WASM and the shared browser host modules;
+`npm run audio:browser` refreshes only the host modules after TypeScript changes.
+Serve the repository root, for example with `python3 -m http.server 8000`, then
+open `http://localhost:8000/docs/practiced-songs/bicycle-built-for-two-grand-staff.html`.
+AudioWorklet requires localhost or HTTPS. Opening the HTML as a standalone
+`file://` document is not a supported Rust playback path. Missing assets produce
+an explicit error; the other sound choices remain available for manual selection.
+The reverb slider belongs to those older sounds and is disabled for the Rust
+engine. Stop, pause, reset and timbre switching cancel queued notes and pending
+startup. The Python generator uses the repository font and preserves the wiring.
+
 This is an **analytic/empirical model**, not measured piano calibration.
 At initialization, Rust generates MIDI 21–108 fundamentals from equal
 temperament at A4=440 Hz, rigid-string partials with a simple register-dependent

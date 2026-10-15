@@ -10,6 +10,9 @@ test("a clean production build ships the playable piano WASM and worklet", async
   // Do not let a previous local audio:wasm or Vite build hide a missing build
   // dependency. These are generated, ignored artifacts; source stays intact.
   await rm(path.join(ROOT, "public/audio/moonlight_wasm.wasm"), { force: true });
+  for (const name of ["sound-engine.js", "physical-c4-worklet-engine.js"]) {
+    await rm(path.join(ROOT, "public/audio", name), { force: true });
+  }
   await rm(path.join(ROOT, "dist"), { recursive: true, force: true });
 
   const result = spawnSync("npm", ["run", "build"], {
@@ -43,4 +46,11 @@ test("a clean production build ships the playable piano WASM and worklet", async
     await readFile(path.join(ROOT, "public/audio/physical-c4-worklet.js")),
     "the deployed worklet must match the current processor",
   );
+  for (const name of ["sound-engine.js", "physical-c4-worklet-engine.js", "score-piano-controller.js"]) {
+    assert.deepEqual(
+      await readFile(path.join(ROOT, "dist/client/audio", name)),
+      await readFile(path.join(ROOT, "public/audio", name)),
+      `the deployed static-score module must match this build: ${name}`,
+    );
+  }
 });

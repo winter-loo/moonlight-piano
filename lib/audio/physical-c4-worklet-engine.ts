@@ -14,6 +14,8 @@ type Options = {
   context?: AudioContext;
   ownsContext?: boolean;
   mode?: "c4" | "basic";
+  wasmUrl?: string;
+  workletUrl?: string;
 };
 
 type WorkletMessage =
@@ -28,6 +30,8 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
   private contextValue: AudioContext | null;
   private readonly ownsContext: boolean;
   private readonly mode: "c4" | "basic";
+  private readonly wasmUrl: string;
+  private readonly workletUrl: string;
   private sustain = 0;
   private node: AudioWorkletNode | null = null;
   private master: GainNode | null = null;
@@ -44,6 +48,8 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
 
   constructor(options: Options = {}) {
     this.mode = options.mode ?? "c4";
+    this.wasmUrl = options.wasmUrl ?? "/audio/moonlight_wasm.wasm";
+    this.workletUrl = options.workletUrl ?? "/audio/physical-c4-worklet.js";
     this.id = this.mode === "basic" ? "basic-piano" : "physical-c4";
     this.label = this.mode === "basic" ? "Rust 基础全键盘" : "Rust 物理 C4";
     this.contextValue = options.context ?? null;
@@ -288,7 +294,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
     let master: GainNode | null = null;
 
     try {
-      const response = await waitFor(fetch("/audio/moonlight_wasm.wasm", { cache: "no-store" }));
+      const response = await waitFor(fetch(this.wasmUrl, { cache: "no-store" }));
       assertCurrent();
       if (!response.ok) {
         throw new Error(`Rust WASM unavailable (HTTP ${response.status}). Run npm run audio:wasm first.`);
@@ -297,7 +303,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
       const wasmBytes = await waitFor(response.arrayBuffer());
       assertCurrent();
 
-      await waitFor(context.audioWorklet.addModule("/audio/physical-c4-worklet.js"));
+      await waitFor(context.audioWorklet.addModule(this.workletUrl));
       assertCurrent();
 
       const createdNode = new AudioWorkletNode(context, this.mode === "basic" ? "moonlight-basic-piano" : "moonlight-physical-c4", {

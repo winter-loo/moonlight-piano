@@ -1,6 +1,7 @@
 import { cp, mkdir } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { buildBrowserSoundEngine } from "./build-browser-sound-engine.mjs";
 
 const root = process.cwd();
 const result = spawnSync("cargo", [
@@ -17,4 +18,5 @@ const source = path.join(root, "target/wasm32-unknown-unknown/release/moonlight_
 const outputDir = path.join(root, "public/audio");
 await mkdir(outputDir, { recursive: true });
 await cp(source, path.join(outputDir, "moonlight_wasm.wasm"));
+await buildBrowserSoundEngine(outputDir);
 console.log("Wrote public/audio/moonlight_wasm.wasm");
