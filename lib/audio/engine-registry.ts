@@ -14,7 +14,7 @@ export const BROWSER_SOUND_ENGINES = [
   {
     id: "physical-c4",
     label: "Rust 物理 C4",
-    description: "与离线 renderer 共用 Rust 物理状态；WASM 在 AudioWorklet 内按 block 渲染。",
+    description: "非线性琴槌驱动持久 C4 琴弦，力度连续改变击弦与泛音；参数待实琴校准，制音器与踏板尚未实现。",
     kind: "physical" as const,
     profile: "physical-c4",
     labLevel: 1.0,

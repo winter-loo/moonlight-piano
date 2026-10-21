@@ -41,10 +41,18 @@ outside the guarded Nyquist bandwidth.
 
 ## Scope
 
-This ticket proves persistent passive string state and sample-accurate event
-application. It does not pretend to complete the piano:
+The original tracer established persistent passive string state and
+sample-accurate event application. The current C4 path also includes the
+nonlinear, unilateral hammer contact and continuous velocity response from
+[issue #7](https://github.com/winter-loo/moonlight-piano/issues/7). See the
+[measurement and listening guide](c4-hammer-quality.md) for reproducible evidence
+and the [contact solver ADR](adr/0001-c4-hammer-contact.md) for the numerical
+method and its limits. This remains an uncalibrated single-note experiment:
 
-- nonlinear hammer contact belongs to ticket #7;
 - damper/repedal behavior belongs to ticket #8;
 - multiple keys, unisons, soundboard, pedals, and radiation retain their later
   tickets and must extend this same core rather than introduce another engine.
+
+The accepted full-keyboard `BasicPianoEngine` from PR #46 remains the production
+default. The experimental C4 path does not replace its sound in the practice
+player.

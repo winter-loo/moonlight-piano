@@ -350,13 +350,19 @@ button:focus-visible { outline: 2px solid #72edf7; outline-offset: 3px; }
 .engine-lab > header > div { display: flex; align-items: center; justify-content: center; gap: 10px; color: #58e2ed; }
 .engine-lab h1 { margin: 0; color: #efd398; font: 26px/1 "STKaiti", "KaiTi", serif; }
 .engine-lab > header > span { justify-self: end; color: #667c96; font-size: 12px; }
-.lab-grid { max-width: 1180px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: 0 auto; }
-.lab-card { min-height: 360px; padding: 24px; border: 1px solid rgba(116,156,204,.2); border-radius: 22px; background: #07162f; }
+.lab-grid { max-width: 1180px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin: 0 auto; }
+.lab-card { min-width: 0; min-height: 360px; padding: 24px; border: 1px solid rgba(116,156,204,.2); border-radius: 22px; background: #07162f; }
 .lab-card h2 { margin: 0 0 22px; color: #e9d09a; font-size: 18px; }
+.lab-card > p { margin: 0 0 16px; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.lab-card > label { display: grid; gap: 8px; margin-bottom: 16px; }
+.lab-card select, .lab-card input[type="range"] { min-width: 0; max-width: 100%; width: 100%; }
+.lab-card .dialog-actions { width: 100%; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin: 16px 0; }
+.lab-card .dialog-actions > button { min-width: 0; min-height: 44px; padding: 10px; font-size: 14px; line-height: 1.4; }
+.lab-card button:disabled { opacity: .45; cursor: not-allowed; }
 .lab-card dl { display: grid; gap: 11px; margin: 0 0 23px; }
-.lab-card dl > div { display: flex; justify-content: space-between; padding-bottom: 9px; border-bottom: 1px solid rgba(114,149,191,.12); }
+.lab-card dl > div { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 9px; border-bottom: 1px solid rgba(114,149,191,.12); }
 .lab-card dt { color: #758ba5; }
-.lab-card dd { margin: 0; color: #dce8f4; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.lab-card dd { min-width: 0; margin: 0; color: #dce8f4; text-align: right; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .lab-tap { width: 100%; min-height: 80px; border: 1px solid rgba(83,226,237,.32); border-radius: 17px; color: #dffcff; background: #0c4058; cursor: pointer; touch-action: none; }
 .lab-input ol { height: 210px; overflow: auto; margin: 16px 0 0; padding: 0; list-style: none; }
 .lab-input li { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(115,148,188,.1); color: #8da3bb; font-size: 11px; }
@@ -373,7 +379,11 @@ button:focus-visible { outline: 2px solid #72edf7; outline-offset: 3px; }
   .tap-pad { width: min(420px, 100%); margin: 0 auto; }
   .rhythm-result { grid-template-columns: 90px 1fr; }
   .rhythm-result .result-actions { grid-column: 1 / -1; }
-  .lab-grid { grid-template-columns: 1fr; }
+  .lab-grid { grid-template-columns: minmax(0, 1fr); }
+  .engine-lab > header { height: auto; min-height: 56px; grid-template-columns: auto minmax(0, 1fr); gap: 12px; }
+  .engine-lab > header > div { justify-content: flex-end; }
+  .engine-lab > header > span { grid-column: 1 / -1; }
+  .engine-lab h1 { font-size: 20px; }
   .echo-coach { width: min(310px, 52vw); height: 145px; }
   .echo-piano { height: clamp(185px, 26vh, 225px); }
   .echo-white-key { padding-bottom: 18px; }

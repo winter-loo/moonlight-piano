@@ -9,6 +9,7 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
     this.eventPtr = 0;
     this.outputPtr = 0;
     this.activeVoicePtr = 0;
+    this.hammerPtr = 0;
     this.ready = false;
     this.failed = false;
     this.queueCapacity = 256;
@@ -32,6 +33,20 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
     this.lastDeadlineRatio = 0;
     this.basic = options.processorOptions?.mode === "basic";
     this.overflowEvents = 0;
+    this.hammerTelemetry = {
+      forceNewtons: 0, peakForceNewtons: 0, compressionMeters: 0,
+      peakCompressionMeters: 0, initialVelocityMps: 0, velocityMps: 0,
+      contactSeconds: 0, hammerEnergyJoules: 0, stringEnergyJoules: 0,
+      totalEnergyJoules: 0, dissipatedEnergyJoules: 0, inputEnergyJoules: 0,
+      maxEnergyErrorJoules: 0, contactCount: 0, inContact: 0,
+    };
+    // Reuse the message and its diagnostic object; process() creates no arrays,
+    // objects or views. MessagePort performs its own structured clone.
+    this.telemetryMessage = {
+      type: "telemetry", blockSize: 0, deadlineRatio: 0, memoryBytes: 0,
+      underruns: 0, lateEvents: 0, overflowEvents: 0, activeVoices: 0,
+      hammer: this.hammerTelemetry,
+    };
 
     this.port.onmessage = (event) => {
       const message = event.data;
@@ -53,6 +68,10 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
       this.instance = instance;
       this.exports = instance.exports;
       this.memory = instance.exports.memory;
+      if (this.exports.moonlight_engine_abi_version() !== 5) {
+        this.fail("Incompatible Rust audio ABI. Rebuild with npm run audio:wasm and reload.");
+        return;
+      }
       const status = this.basic
         ? this.exports.moonlight_basic_init(sampleRate)
         : this.exports.moonlight_engine_init(sampleRate, 0x243f6a88, 0x85a308d3);
@@ -63,6 +82,7 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
       this.eventPtr = this.exports.moonlight_event_buffer_ptr();
       this.outputPtr = this.exports.moonlight_output_buffer_ptr();
       this.activeVoicePtr = this.exports.moonlight_active_voices_ptr();
+      this.hammerPtr = this.exports.moonlight_hammer_diagnostics_ptr();
       this.eventView = new DataView(this.memory.buffer);
       this.outputView = new Float32Array(this.memory.buffer, this.outputPtr, 32768);
       this.ready = true;
@@ -212,16 +232,31 @@ class MoonlightPhysicalC4Processor extends AudioWorkletProcessor {
     this.telemetryCountdown += 1;
     if (this.telemetryCountdown >= 128) {
       this.telemetryCountdown = 0;
-      this.port.postMessage({
-        type: "telemetry",
-        blockSize: frames,
-        deadlineRatio: this.lastDeadlineRatio,
-        memoryBytes: this.memory.buffer.byteLength,
-        underruns: this.underruns,
-        lateEvents: this.lateEvents,
-        overflowEvents: this.overflowEvents,
-        activeVoices: this.eventView.getUint32(this.activeVoicePtr, true),
-      });
+      const message = this.telemetryMessage;
+      message.blockSize = frames;
+      message.deadlineRatio = this.lastDeadlineRatio;
+      message.memoryBytes = this.memory.buffer.byteLength;
+      message.underruns = this.underruns;
+      message.lateEvents = this.lateEvents;
+      message.overflowEvents = this.overflowEvents;
+      message.activeVoices = this.eventView.getUint32(this.activeVoicePtr, true);
+      const hammer = this.hammerTelemetry;
+      hammer.forceNewtons = this.eventView.getFloat64(this.hammerPtr, true);
+      hammer.peakForceNewtons = this.eventView.getFloat64(this.hammerPtr + 8, true);
+      hammer.compressionMeters = this.eventView.getFloat64(this.hammerPtr + 16, true);
+      hammer.peakCompressionMeters = this.eventView.getFloat64(this.hammerPtr + 24, true);
+      hammer.initialVelocityMps = this.eventView.getFloat64(this.hammerPtr + 32, true);
+      hammer.velocityMps = this.eventView.getFloat64(this.hammerPtr + 40, true);
+      hammer.contactSeconds = this.eventView.getFloat64(this.hammerPtr + 48, true);
+      hammer.hammerEnergyJoules = this.eventView.getFloat64(this.hammerPtr + 56, true);
+      hammer.stringEnergyJoules = this.eventView.getFloat64(this.hammerPtr + 64, true);
+      hammer.totalEnergyJoules = this.eventView.getFloat64(this.hammerPtr + 72, true);
+      hammer.dissipatedEnergyJoules = this.eventView.getFloat64(this.hammerPtr + 80, true);
+      hammer.inputEnergyJoules = this.eventView.getFloat64(this.hammerPtr + 88, true);
+      hammer.maxEnergyErrorJoules = this.eventView.getFloat64(this.hammerPtr + 96, true);
+      hammer.contactCount = this.eventView.getFloat64(this.hammerPtr + 104, true);
+      hammer.inContact = this.eventView.getFloat64(this.hammerPtr + 112, true);
+      this.port.postMessage(message);
     }
     return true;
   }

@@ -37,6 +37,7 @@ test("a clean production build ships the playable piano WASM and worklet", async
     "moonlight_event_buffer_ptr",
     "moonlight_output_buffer_ptr",
     "moonlight_active_voices_ptr",
+    "moonlight_hammer_diagnostics_ptr",
     "moonlight_process_block",
   ]) {
     assert.equal(exports.get(name), "function", `missing AudioWorklet ABI export: ${name}`);

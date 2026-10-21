@@ -24,10 +24,12 @@ async function makeProcessor() {
       async instantiate() {
         return { instance: { exports: {
           memory,
+          moonlight_engine_abi_version: () => 5,
           moonlight_basic_init: () => 0,
           moonlight_event_buffer_ptr: () => 0,
           moonlight_output_buffer_ptr: () => 8192,
           moonlight_active_voices_ptr: () => 4096,
+          moonlight_hammer_diagnostics_ptr: () => 4104,
           moonlight_process_block(lo, hi, frames, count) {
             for (let index = 0; index < count; index++) {
               const base = index * 16;
