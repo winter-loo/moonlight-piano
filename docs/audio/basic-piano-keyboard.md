@@ -1,5 +1,9 @@
 # Analytic basic piano
 
+Listening status: the initial MVP was rejected for dirty sound. The current
+candidate repairs specific synthesis artifacts; subjective tone acceptance is
+still pending. See [tone-quality regression](basic-piano-tone-quality.md).
+
 Select **Rust 基础全键盘** in `/lab/engine`, after `npm run audio:wasm`.
 The A0–C8 button schedules note-on/off at absolute sample frames; the chord
 buttons exercise simultaneous notes through the existing SoundEngine and
@@ -28,7 +32,9 @@ inharmonicity prior, register-dependent decays and at most 12 valid partials per
 key. Partials beyond 0.98 Nyquist are omitted. Velocity varies the excitation
 spectrum continuously. Each note retains one persistent modal state; repeating
 that note injects more energy into that state. Release applies a simple damping
-envelope. A bounded master response keeps large chords within output range.
+envelope without detuning the oscillator. Modal kicks are normalized for
+frequency and sample rate. The master is linear below 0.9 full scale; overload
+protection above that level keeps extreme/repeated chords within output range.
 No audio samples enter the runtime.
 
 The current capacity is **32 sounding key states**, not 32 strings or 32

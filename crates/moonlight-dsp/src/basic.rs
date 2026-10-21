@@ -112,7 +112,12 @@ impl BasicPianoEngine {
                 key.modes[key.count] = Mode {
                     feedback_1: coefficients.feedback_1,
                     feedback_2: coefficients.feedback_2,
-                    amplitude: 1.0 / (partial as f64).powf(1.4),
+                    // A velocity kick into y[n-1] produces A*r^n*sin(n*omega).
+                    // Injecting A directly into y[n] instead gives a spurious
+                    // 1/sin(omega) gain: bass notes overload the output stage.
+                    amplitude: (core::f64::consts::TAU * frequency / sample_rate_hz as f64).sin()
+                        / coefficients.pole_radius
+                        / (partial as f64).powf(1.4),
                     ..Mode::default()
                 };
                 key.count += 1;
@@ -236,11 +241,14 @@ impl BasicPianoEngine {
                 for mode in voice.modes.iter_mut().take(voice.count) {
                     let next = mode.feedback_1 * mode.current + mode.feedback_2 * mode.previous;
                     mode.previous = mode.current;
-                    mode.current = if voice.held {
-                        next
-                    } else {
-                        next * self.release
-                    };
+                    mode.current = next;
+                    if !voice.held {
+                        // Scale the entire state, not just the new sample.
+                        // This changes pole radius without moving pole angle
+                        // (pitch); damping only y[n] detunes the release tail.
+                        mode.current *= self.release;
+                        mode.previous *= self.release;
+                    }
                     voice_sum += mode.current;
                     energy += mode.current.abs() + mode.previous.abs();
                 }
@@ -263,9 +271,11 @@ impl BasicPianoEngine {
             }
             left_sum += 0.08 * self.body[0].current + 0.03 * self.body[1].current;
             right_sum += 0.03 * self.body[0].current + 0.08 * self.body[1].current;
-            // A bounded, continuous master response prevents a 32-key chord from clipping.
-            let left_rendered = (0.12 * left_sum / (1.0 + 0.2 * left_sum.abs())) as f32;
-            let right_rendered = (0.12 * right_sum / (1.0 + 0.2 * right_sum.abs())) as f32;
+            // Ordinary playing stays linear. Protection engages only above
+            // 0.9 full scale, instead of adding harmonics/intermodulation to
+            // every single note and chord at every listening level.
+            let left_rendered = protect_output(0.3 * left_sum);
+            let right_rendered = protect_output(0.3 * right_sum);
             if !left_rendered.is_finite() || !right_rendered.is_finite() {
                 self.reset();
                 output.fill(0.0);
@@ -367,10 +377,19 @@ impl BasicPianoEngine {
                 let tilt = velocity.powf(0.12);
                 for mode in voice.modes.iter_mut().take(voice.count) {
                     // High partials gain proportionally more energy at greater velocity.
-                    mode.current += mode.amplitude * spectral;
+                    mode.previous -= mode.amplitude * spectral;
                     spectral *= tilt;
                 }
             }
         }
+    }
+}
+
+fn protect_output(sample: f64) -> f32 {
+    let magnitude = sample.abs();
+    if magnitude <= 0.9 || !magnitude.is_finite() {
+        sample as f32
+    } else {
+        (sample.signum() * (0.9 + 0.1 * (1.0 - 1.0 / (1.0 + 10.0 * (magnitude - 0.9))))) as f32
     }
 }
