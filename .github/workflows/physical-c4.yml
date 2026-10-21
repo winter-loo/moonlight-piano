@@ -60,7 +60,8 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install pinned acoustic analysis dependencies
-        run: python3 -m pip install --only-binary=:all: -r tools/acoustics/requirements.txt
+        run: |
+          python3 -m pip install --only-binary=:all: -r tools/acoustics/requirements.txt
       - name: Measure all 127 hammer velocities and higher-rate convergence
         env:
           OPENBLAS_NUM_THREADS: "1"
