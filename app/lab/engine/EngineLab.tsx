@@ -10,6 +10,7 @@ import {
   type BrowserSoundEngineId,
 } from "@/lib/audio/engine-registry";
 import { scheduleMetronome } from "@/lib/audio/scheduler";
+import { createC4VelocitySweep, type C4SweepKind } from "@/lib/audio/c4-velocity-sweep";
 import { NOW, atSampleFrame, type SoundEngine, type SoundEngineSnapshot } from "@/lib/audio/sound-engine";
 import { PracticeTransport, type TransportSnapshot } from "@/lib/engine/transport";
 import { mariageAmourContent } from "@/lib/music/content/mariage-amour";
@@ -42,10 +43,13 @@ export function EngineLab() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [frameHealth, setFrameHealth] = useState({ fps: 0, largestGap: 0 });
   const [pedals, setPedals] = useState({ sustain: 0, sostenuto: 0, unaCorda: 0 });
+  const [velocity, setVelocity] = useState(0.6);
+  const [velocitySweep, setVelocitySweep] = useState<ReturnType<typeof createC4VelocitySweep> | null>(null);
 
   const disposeEngine = useCallback(async () => {
     releaseTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     releaseTimersRef.current = [];
+    setVelocitySweep(null);
 
     const unsubscribe = unsubscribeEngineRef.current;
     unsubscribeEngineRef.current = null;
@@ -177,7 +181,11 @@ export function EngineLab() {
   const record = useCallback((source: string, eventTimeStamp = performance.now(), notes: number[] = [60]) => {
     const transport = transportRef.current;
     const engine = engineRef.current;
-    if (!transport || !engine) return;
+    if (!transport || !engine || !engine.snapshot().ready) return;
+    if (velocitySweep) {
+      engine.stopAll();
+      setVelocitySweep(null);
+    }
     const at = engine.clock().currentTimeSeconds;
     const serial = logSerialRef.current + 1;
     const sources = notes.map((_note, index) => `lab-${source}-${serial}-${index}`);
@@ -185,7 +193,7 @@ export function EngineLab() {
       type: "note-on" as const,
       sourceId: sources[index],
       note,
-      velocity: 0.8,
+      velocity,
       gain: BROWSER_SOUND_ENGINES.find((candidate) => candidate.id === selectedEngineId)?.labLevel ?? 0.24,
       time: NOW,
     })));
@@ -208,6 +216,17 @@ export function EngineLab() {
       audioTime: at,
       dispatchDelay: Math.max(0, performance.now() - eventTimeStamp),
     }, ...current].slice(0, 12));
+  }, [selectedEngineId, velocity, velocitySweep]);
+
+  const playVelocitySweep = useCallback((kind: C4SweepKind) => {
+    const engine = engineRef.current;
+    if (!engine?.snapshot().ready || selectedEngineId !== "physical-c4") return;
+    releaseTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    releaseTimersRef.current = [];
+    engine.stopAll();
+    const sweep = createC4VelocitySweep(engine.clock(), kind);
+    engine.dispatch(sweep.events);
+    setVelocitySweep(sweep);
   }, [selectedEngineId]);
 
   const playScale = useCallback(() => {
@@ -239,11 +258,18 @@ export function EngineLab() {
 
   const togglePause = useCallback(async () => {
     const transport = transportRef.current;
-    if (!transport) return;
-    if (transport.snapshot().state === "paused") await transport.resume();
+    const engine = engineRef.current;
+    if (!transport || !engine?.snapshot().ready) return;
+    const state = transport.snapshot().state;
+    // The timing probe finishes after eight beats, but listening and velocity
+    // sweeps can continue. Keep control of the shared audio clock afterward.
+    if (state === "completed") {
+      if (engine.clock().state === "suspended") await engine.resume();
+      else await engine.suspend();
+    } else if (state === "paused") await transport.resume();
     else await transport.pause();
     setSnapshot(transport.snapshot());
-    if (engineRef.current) setEngineSnapshot(engineRef.current.snapshot());
+    if (engineRef.current === engine) setEngineSnapshot(engine.snapshot());
   }, []);
 
   useEffect(() => {
@@ -269,6 +295,13 @@ export function EngineLab() {
   }, [stopLab]);
 
   const engineClock = engineSnapshot?.clock;
+  const sweepFrame = engineClock?.currentSampleFrame ?? 0;
+  const sweepIndex = velocitySweep
+    ? Math.max(0, Math.min(velocitySweep.velocities.length - 1,
+      Math.floor((sweepFrame - velocitySweep.startFrame) / velocitySweep.stepFrames)))
+    : 0;
+  const sweepRunning = velocitySweep !== null && sweepFrame < velocitySweep.endFrame;
+  const hammer = engineSnapshot?.parameters;
 
   return (
     <main className="engine-lab">
@@ -332,7 +365,12 @@ export function EngineLab() {
 
         <article className="lab-card lab-input">
           <h2>输入事件</h2>
-          <button type="button" className="lab-tap" onPointerDown={(event: React.PointerEvent<HTMLButtonElement>) => record("pointer-c4", event.timeStamp)}>C4 · 点击或空格</button>
+          <label>
+            触键力度 {velocity.toFixed(3)} · MIDI {Math.round(velocity * 127)}
+            <input aria-label="触键力度" type="range" min="0.001" max="1" step="0.001" value={velocity}
+              onChange={(event: React.ChangeEvent<HTMLInputElement>) => setVelocity(Number(event.target.value))} />
+          </label>
+          <button type="button" className="lab-tap" disabled={!engineSnapshot?.ready} onPointerDown={(event: React.PointerEvent<HTMLButtonElement>) => record("pointer-c4", event.timeStamp)}>C4 · 点击或空格</button>
           <div className="dialog-actions">
           <button type="button" disabled={selectedEngineId === "physical-c4"} onClick={(event: React.MouseEvent<HTMLButtonElement>) => record("c-major", event.timeStamp, [60, 64, 67])}>C 大三和弦</button>
             <button type="button" disabled={selectedEngineId === "physical-c4"} onClick={(event: React.MouseEvent<HTMLButtonElement>) => record("wide-chord", event.timeStamp, [48, 60, 67, 72])}>宽音域和弦</button>
@@ -344,6 +382,35 @@ export function EngineLab() {
             ))}
           </ol>
         </article>
+
+        {selectedEngineId === "physical-c4" && (
+          <article className="lab-card lab-clock">
+            <h2>C4 琴槌与力度</h2>
+            <p>听轻弹到重弹的起音与泛音变化。连续扫描保留琴弦余振；逐档独立测量见离线报告。</p>
+            <div className="dialog-actions">
+              <button type="button" disabled={!engineSnapshot?.ready || sweepRunning} onClick={() => playVelocitySweep("listening")}>ppp–fff 试听</button>
+              <button type="button" disabled={!engineSnapshot?.ready || sweepRunning} onClick={() => playVelocitySweep("full")}>扫描 127 档力度</button>
+              <button type="button" disabled={!engineSnapshot?.ready} onClick={() => {
+                engineRef.current?.stopAll();
+                setVelocitySweep(null);
+              }}>停止试听</button>
+            </div>
+            <p aria-live="polite">{sweepRunning && velocitySweep
+              ? `扫描 ${sweepIndex + 1}/${velocitySweep.velocities.length} · 力度 ${velocitySweep.velocities[sweepIndex].toFixed(3)}`
+              : velocitySweep ? "扫描完成" : "127 档扫描约 32 秒；7 档试听约 11 秒。"}</p>
+            <dl>
+              <div><dt>琴槌初速度</dt><dd>{(hammer?.hammerInitialVelocityMps ?? 0).toFixed(3)} m/s</dd></div>
+              <div><dt>接触峰值力</dt><dd>{(hammer?.hammerPeakForceNewtons ?? 0).toFixed(3)} N</dd></div>
+              <div><dt>最大毡压缩</dt><dd>{(hammer?.hammerPeakCompressionMm ?? 0).toFixed(4)} mm</dd></div>
+              <div><dt>接触时长</dt><dd>{(hammer?.hammerContactMs ?? 0).toFixed(3)} ms</dd></div>
+              <div><dt>琴弦能量</dt><dd>{(hammer?.hammerStringEnergyJoules ?? 0).toExponential(3)} J</dd></div>
+              <div><dt>累计输入能量</dt><dd>{(hammer?.hammerInputEnergyJoules ?? 0).toExponential(3)} J</dd></div>
+              <div><dt>累计耗散能量</dt><dd>{(hammer?.hammerDissipatedEnergyJoules ?? 0).toExponential(3)} J</dd></div>
+              <div><dt>最大能量余额误差</dt><dd>{(hammer?.hammerMaxEnergyErrorJoules ?? 0).toExponential(3)} J</dd></div>
+            </dl>
+            <p>峰值和时长保留最近一次击弦结果；诊断由音频块更新。当前参数尚未用真实钢琴数据校准。</p>
+          </article>
+        )}
 
         <article className="lab-card lab-input">
           <h2>踏板事件</h2>

@@ -8,9 +8,11 @@ on:
       - "lib/audio/**"
       - "public/audio/**"
       - "app/lab/engine/**"
+      - "app/globals.css"
       - "tests/unit/**"
       - "tests/build/**"
       - "tests/browser/bicycle-score-audio.test.mjs"
+      - "tests/browser/*hammer*.test.mjs"
       - "package.json"
       - "package-lock.json"
       - "Cargo.toml"
@@ -32,8 +34,10 @@ on:
       - "lib/audio/**"
       - "public/audio/**"
       - "app/lab/engine/**"
+      - "app/globals.css"
       - "tests/unit/**"
       - "tests/build/**"
+      - "tests/browser/*hammer*.test.mjs"
       - "package.json"
       - "package-lock.json"
       - "Cargo.toml"
@@ -63,8 +67,10 @@ jobs:
       - name: Clean production build includes browser audio assets
         run: npm run test:build
       - run: node --test tests/unit/production-build.test.mjs
-      - run: node --experimental-strip-types --test tests/unit/sound-engine.test.mjs tests/unit/physical-c4-worklet.test.mjs tests/unit/basic-piano-worklet.test.mjs tests/unit/basic-piano-source-ownership.test.mjs tests/unit/score-piano-controller.test.mjs
+      - run: node --experimental-strip-types --test tests/unit/sound-engine.test.mjs tests/unit/physical-c4-worklet.test.mjs tests/unit/basic-piano-worklet.test.mjs tests/unit/basic-piano-source-ownership.test.mjs tests/unit/score-piano-controller.test.mjs tests/unit/c4-velocity-sweep.test.mjs
       - run: npx tsc -p tsconfig.audio-worklet.json --noEmit
       - run: npx playwright install --with-deps chromium
       - name: Standalone grand staff browser audio acceptance
         run: npm run test:score-audio
+      - name: C4 hammer native-WASM parity and real AudioWorklet acceptance
+        run: npm run test:hammer

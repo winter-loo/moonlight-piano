@@ -23,6 +23,9 @@
 
 ## 质量与验证
 
+- [`audio/c4-hammer-quality.md`](audio/c4-hammer-quality.md)：C4 非线性琴槌的力度连续性、频谱、能量、WASM 一致性与试听对比
+- [`audio/adr/0001-c4-hammer-contact.md`](audio/adr/0001-c4-hammer-contact.md)：单边接触求解、被动性、固定计算预算与模型边界
+- [`audio/web-physical-c4.md`](audio/web-physical-c4.md)：浏览器音频实验室、力度扫描与实时诊断
 - [`qa/视觉回归工具.md`](qa/视觉回归工具.md)：像素比较命令、指标、产物与自动判定
 - [`qa/B1-02-视觉验收.md`](qa/B1-02-视觉验收.md)：五线谱节奏关卡的参考图、验收记录和证据
 - [`qa/iPad-视口验收矩阵.md`](qa/iPad-视口验收矩阵.md)：目标设备、视口与发布前手工检查

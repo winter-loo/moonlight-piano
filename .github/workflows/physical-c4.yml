@@ -11,6 +11,8 @@ on:
       - "crates/**"
       - "fixtures/physical-c4/**"
       - "scripts/render-physical-c4.sh"
+      - "scripts/render-hammer-review.py"
+      - "tools/acoustics/requirements.txt"
       - "docs/audio/physical-c4-tracer.md"
       - ".github/workflows/physical-c4.yml"
   pull_request:
@@ -20,6 +22,8 @@ on:
       - "crates/**"
       - "fixtures/physical-c4/**"
       - "scripts/render-physical-c4.sh"
+      - "scripts/render-hammer-review.py"
+      - "tools/acoustics/requirements.txt"
       - "docs/audio/physical-c4-tracer.md"
       - ".github/workflows/physical-c4.yml"
   workflow_dispatch:
@@ -52,6 +56,16 @@ jobs:
           cmp work/c4-a/c4-energy.csv work/c4-b/c4-energy.csv
       - name: Benchmark smoke test
         run: cargo run --quiet --release -p moonlight-bench
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned acoustic analysis dependencies
+        run: python3 -m pip install --only-binary=:all: -r tools/acoustics/requirements.txt
+      - name: Measure all 127 hammer velocities and higher-rate convergence
+        env:
+          OPENBLAS_NUM_THREADS: "1"
+          OMP_NUM_THREADS: "1"
+        run: python3 scripts/render-hammer-review.py
       - name: Upload audible tracer and reports
         uses: actions/upload-artifact@v4
         with:
@@ -61,4 +75,8 @@ jobs:
             work/c4-a/c4-report.json
             work/c4-a/c4-energy.csv
             work/c4-a/c4-timing.json
+            work/c4-hammer-review/hammer-review.json
+            work/c4-hammer-review/hammer-review.md
+            work/c4-hammer-review/*/*.wav
+            work/c4-hammer-review/*/hammer-diagnostics.csv
           if-no-files-found: error

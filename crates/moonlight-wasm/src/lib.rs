@@ -24,6 +24,9 @@ pub struct WasmEvent {
 struct WasmEngine {
     engine: Core,
     active_voices: u32,
+    // ABI 5: sixteen f64 slots, refreshed by the same block render call.
+    // The final slot is reserved. Basic mode exposes zeroed diagnostics.
+    hammer_diagnostics: [f64; 16],
     events: [WasmEvent; MAX_EVENTS_PER_BLOCK],
     output: [f32; MAX_BLOCK_FRAMES * 2],
 }
@@ -39,7 +42,7 @@ thread_local! {
 
 #[no_mangle]
 pub extern "C" fn moonlight_engine_abi_version() -> u32 {
-    4
+    5
 }
 
 #[no_mangle]
@@ -57,6 +60,7 @@ pub extern "C" fn moonlight_engine_init(sample_rate_hz: u32, seed_lo: u32, seed_
         *slot.borrow_mut() = Some(WasmEngine {
             engine: Core::C4(Box::new(engine)),
             active_voices: 0,
+            hammer_diagnostics: [0.0; 16],
             events: [WasmEvent::default(); MAX_EVENTS_PER_BLOCK],
             output: [0.0; MAX_BLOCK_FRAMES * 2],
         });
@@ -74,6 +78,7 @@ pub extern "C" fn moonlight_basic_init(sample_rate_hz: u32) -> i32 {
         *slot.borrow_mut() = Some(WasmEngine {
             engine: Core::Basic(Box::new(engine)),
             active_voices: 0,
+            hammer_diagnostics: [0.0; 16],
             events: [WasmEvent::default(); MAX_EVENTS_PER_BLOCK],
             output: [0.0; MAX_BLOCK_FRAMES * 2],
         });
@@ -105,6 +110,17 @@ pub extern "C" fn moonlight_active_voices_ptr() -> *const u32 {
         let slot = slot.borrow();
         slot.as_ref()
             .map_or(std::ptr::null(), |state| &state.active_voices)
+    })
+}
+
+/// Read-only shared diagnostic block. Obtain once after initialization; reading
+/// it does not require another JS/WASM call in the realtime render path.
+#[no_mangle]
+pub extern "C" fn moonlight_hammer_diagnostics_ptr() -> *const f64 {
+    ENGINE.with(|slot| {
+        let slot = slot.borrow();
+        slot.as_ref()
+            .map_or(std::ptr::null(), |state| state.hammer_diagnostics.as_ptr())
     })
 }
 
@@ -144,6 +160,12 @@ pub extern "C" fn moonlight_process_block(
             if source.frame_offset >= frame_count {
                 return 6;
             }
+            if matches!(source.kind, 1 | 2) && source.note > 127 {
+                return 6;
+            }
+            let Some(frame) = block_start.checked_add(u64::from(source.frame_offset)) else {
+                return 6;
+            };
             let kind = match source.kind {
                 1 => PianoEventKind::NoteOn {
                     note: source.note as u8,
@@ -159,10 +181,7 @@ pub extern "C" fn moonlight_process_block(
                 },
                 _ => return 7,
             };
-            *event = PianoEvent {
-                frame: block_start + u64::from(source.frame_offset),
-                kind,
-            };
+            *event = PianoEvent { frame, kind };
         }
 
         let (left, remaining) = state.output.split_at_mut(MAX_BLOCK_FRAMES);
@@ -184,6 +203,27 @@ pub extern "C" fn moonlight_process_block(
             Core::C4(engine) => engine.state_counts().active_strings as u32,
             Core::Basic(engine) => engine.active_voices() as u32,
         };
+        if let Core::C4(engine) = &state.engine {
+            let hammer = engine.hammer_diagnostics();
+            state.hammer_diagnostics = [
+                hammer.force_newtons,
+                hammer.peak_force_newtons,
+                hammer.compression_meters,
+                hammer.peak_compression_meters,
+                hammer.initial_velocity_mps,
+                hammer.hammer_velocity_mps,
+                hammer.contact_seconds,
+                hammer.hammer_energy_joules,
+                hammer.string_energy_joules,
+                hammer.total_energy_joules,
+                hammer.dissipated_energy_joules,
+                hammer.input_energy_joules,
+                hammer.max_energy_error_joules,
+                f64::from(hammer.contact_count),
+                if hammer.in_contact { 1.0 } else { 0.0 },
+                0.0,
+            ];
+        }
         if okay {
             0
         } else {
@@ -219,34 +259,81 @@ mod tests {
             )
             .unwrap();
 
-        let mut wrapped = WasmEngine {
-            engine: Core::C4(Box::new(
-                PianoEngine::new(&pack, sample_rate, 0x85a308d3243f6a88).unwrap(),
-            )),
-            active_voices: 0,
-            events: [WasmEvent::default(); MAX_EVENTS_PER_BLOCK],
-            output: [0.0; MAX_BLOCK_FRAMES * 2],
-        };
-        wrapped.events[0] = WasmEvent {
-            frame_offset: 17,
-            kind: 1,
-            note: 60,
-            value: 0.8,
-        };
-        let event = wrapped.events[0];
-        let events = [PianoEvent {
-            frame: u64::from(event.frame_offset),
-            kind: PianoEventKind::NoteOn {
-                note: event.note as u8,
-                velocity: event.value,
-            },
-        }];
-        if let Core::C4(engine) = &mut wrapped.engine {
-            engine
-                .process_block(0, &events, &mut wrapped.output[..128])
-                .unwrap();
-        }
+        assert_eq!(
+            moonlight_engine_init(sample_rate, 0x243f6a88, 0x85a308d3),
+            0
+        );
+        assert_eq!(moonlight_engine_abi_version(), 5);
+        assert!(!moonlight_hammer_diagnostics_ptr().is_null());
+        ENGINE.with(|slot| {
+            slot.borrow_mut().as_mut().unwrap().events[0] = WasmEvent {
+                frame_offset: 17,
+                kind: 1,
+                note: 60,
+                value: 0.8,
+            };
+        });
+        assert_eq!(moonlight_process_block(0, 0, 128, 1), 0);
+        ENGINE.with(|slot| {
+            let state = slot.borrow();
+            let state = state.as_ref().unwrap();
+            assert_eq!(&state.output[..128], &direct_output);
+            assert_eq!(
+                state.hammer_diagnostics[1],
+                direct.hammer_diagnostics().peak_force_newtons
+            );
+            assert_eq!(
+                state.hammer_diagnostics[6],
+                direct.hammer_diagnostics().contact_seconds
+            );
+            assert!(state.hammer_diagnostics[11] > 0.0);
+        });
+    }
 
-        assert_eq!(&wrapped.output[..128], &direct_output);
+    #[test]
+    fn malformed_wide_note_cannot_wrap_to_c4_in_the_abi() {
+        assert_eq!(moonlight_engine_init(48_000, 1, 0), 0);
+        ENGINE.with(|slot| {
+            slot.borrow_mut().as_mut().unwrap().events[0] = WasmEvent {
+                frame_offset: 0,
+                kind: 1,
+                note: 316,
+                value: 0.8,
+            };
+        });
+        assert_ne!(moonlight_process_block(0, 0, 128, 1), 0);
+        ENGINE.with(|slot| {
+            assert!(slot
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .hammer_diagnostics
+                .iter()
+                .all(|value| *value == 0.0));
+        });
+    }
+
+    #[test]
+    fn reset_clears_diagnostics_in_the_same_render_call() {
+        assert_eq!(moonlight_engine_init(48_000, 1, 0), 0);
+        ENGINE.with(|slot| {
+            slot.borrow_mut().as_mut().unwrap().events[0] = WasmEvent {
+                frame_offset: 0,
+                kind: 1,
+                note: 60,
+                value: 1.0,
+            };
+        });
+        assert_eq!(moonlight_process_block(0, 0, 128, 1), 0);
+        ENGINE.with(|slot| {
+            slot.borrow_mut().as_mut().unwrap().events[0].kind = 3;
+        });
+        assert_eq!(moonlight_process_block(128, 0, 128, 1), 0);
+        ENGINE.with(|slot| {
+            let state = slot.borrow();
+            let state = state.as_ref().unwrap();
+            assert!(state.hammer_diagnostics.iter().all(|value| *value == 0.0));
+            assert!(state.output[..128].iter().all(|value| *value == 0.0));
+        });
     }
 }
