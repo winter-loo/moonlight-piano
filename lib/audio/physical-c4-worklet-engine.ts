@@ -18,9 +18,27 @@ type Options = {
   workletUrl?: string;
 };
 
+type HammerTelemetry = {
+  forceNewtons: number;
+  peakForceNewtons: number;
+  compressionMeters: number;
+  peakCompressionMeters: number;
+  initialVelocityMps: number;
+  velocityMps: number;
+  contactSeconds: number;
+  hammerEnergyJoules: number;
+  stringEnergyJoules: number;
+  totalEnergyJoules: number;
+  dissipatedEnergyJoules: number;
+  inputEnergyJoules: number;
+  maxEnergyErrorJoules: number;
+  contactCount: number;
+  inContact: number;
+};
+
 type WorkletMessage =
   | { type: "ready"; memoryBytes: number }
-  | { type: "telemetry"; blockSize: number; deadlineRatio: number; memoryBytes: number; underruns: number; lateEvents: number; overflowEvents: number; activeVoices: number }
+  | { type: "telemetry"; blockSize: number; deadlineRatio: number; memoryBytes: number; underruns: number; lateEvents: number; overflowEvents: number; activeVoices: number; hammer: HammerTelemetry }
   | { type: "error"; message: string };
 
 export class PhysicalC4WorkletEngine implements SoundEngine {
@@ -44,6 +62,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
   private initializationPromise: Promise<void> | null = null;
   private rejectPendingInitialization: ((error: Error) => void) | null = null;
   private activeVoices = 0;
+  private hammer: HammerTelemetry | null = null;
   private telemetry = { blockSize: 0, deadlineRatio: 0, memoryBytes: 0, underruns: 0, lateEvents: 0, overflowEvents: 0 };
 
   constructor(options: Options = {}) {
@@ -231,6 +250,20 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
         underruns: this.telemetry.underruns,
         lateEvents: this.telemetry.lateEvents,
         overflowEvents: this.telemetry.overflowEvents,
+        ...(this.mode === "c4" && this.hammer ? {
+          hammerForceNewtons: this.hammer.forceNewtons,
+          hammerPeakForceNewtons: this.hammer.peakForceNewtons,
+          hammerPeakCompressionMm: this.hammer.peakCompressionMeters * 1000,
+          hammerInitialVelocityMps: this.hammer.initialVelocityMps,
+          hammerContactMs: this.hammer.contactSeconds * 1000,
+          hammerStringEnergyJoules: this.hammer.stringEnergyJoules,
+          hammerTotalEnergyJoules: this.hammer.totalEnergyJoules,
+          hammerDissipatedEnergyJoules: this.hammer.dissipatedEnergyJoules,
+          hammerInputEnergyJoules: this.hammer.inputEnergyJoules,
+          hammerMaxEnergyErrorJoules: this.hammer.maxEnergyErrorJoules,
+          hammerContactCount: this.hammer.contactCount,
+          hammerInContact: this.hammer.inContact,
+        } : {}),
       },
       clock: this.clock(),
       routeVersion: this.routeVersion,
@@ -375,6 +408,7 @@ export class PhysicalC4WorkletEngine implements SoundEngine {
           if (message.type === "telemetry") {
             if (!isCurrentInitialization()) return;
             this.telemetry = message;
+            this.hammer = message.hammer;
             this.activeVoices = message.activeVoices;
             this.emit();
             return;
